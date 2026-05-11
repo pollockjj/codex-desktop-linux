@@ -419,9 +419,12 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
   assert.match(patched, /Override Redirect State/);
   assert.match(patched, /Absolute upper-left X/);
   assert.match(patched, /Number\(l\)!==t\.x/);
+  assert.match(patched, /Number\(h\)!==t\.y/);
   assert.match(patched, /Number\(d\)!==t\.width/);
+  assert.doesNotMatch(patched, /let\[,l,u,d,f\]=c/);
   assert.doesNotMatch(patched, /this\.codexLinuxIsI3Session\(\)\)\{this\.codexLinuxStopAvatarPassthroughRecovery\(\),this\.codexLinuxAvatarInputShapeKey=null,this\.pointerInteractive=!0,this\.mousePassthroughEnabled&&\(this\.mousePassthroughEnabled=!1\),e\.setIgnoreMouseEvents\(!1\);return\}/);
-  assert.match(patched, /typeof e\.setShape==`function`&&!this\.codexLinuxIsI3Session\(\)/);
+  assert.match(patched, /if\(process\.platform===`linux`&&typeof e\.setShape==`function`\)\{/);
+  assert.doesNotMatch(patched, /typeof e\.setShape==`function`&&!this\.codexLinuxIsI3Session\(\)/);
   assert.match(patched, /if\(t==null\)return null/);
   assert.match(patched, /if\(t==null\)return!1;let n=JSON\.stringify\(t\)/);
   assert.match(patched, /e\.setShape\(t\),this\.codexLinuxAvatarInputShapeKey=n;return!0/);
