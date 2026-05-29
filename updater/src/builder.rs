@@ -42,7 +42,12 @@ const REQUIRED_BUNDLE_FILES: [(&str, &str); 17] = [
     ("assets/codex.png", "assets/codex.png"),
     ("linux-features", "linux-features"),
 ];
-const OPTIONAL_BUNDLE_FILES: [(&str, &str); 3] = [
+const OPTIONAL_BUNDLE_FILES: [(&str, &str); 5] = [
+    ("CHANGELOG.md", "CHANGELOG.md"),
+    (
+        ".codex-linux/source-info.json",
+        ".codex-linux/source-info.json",
+    ),
     ("scripts/build-rpm.sh", "scripts/build-rpm.sh"),
     ("scripts/build-pacman.sh", "scripts/build-pacman.sh"),
     (
@@ -550,8 +555,14 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop-${VER}-1-x86_64.pkg.tar.zst"
         fs::create_dir_all(bundle_root.join("launcher"))?;
         fs::create_dir_all(bundle_root.join("packaging/linux"))?;
         fs::create_dir_all(bundle_root.join("assets"))?;
+        fs::create_dir_all(bundle_root.join(".codex-linux"))?;
         write_fake_computer_use_bundle(&bundle_root)?;
         write_fake_linux_features_bundle(&bundle_root)?;
+        fs::write(bundle_root.join("CHANGELOG.md"), b"# Changelog\n")?;
+        fs::write(
+            bundle_root.join(".codex-linux/source-info.json"),
+            b"{\"commit\":\"0123456789012345678901234567890123456789\",\"version\":\"0.8.1\"}\n",
+        )?;
         fs::write(
             bundle_root.join("launcher/start.sh.template"),
             b"# fake launcher template\n",
@@ -683,6 +694,9 @@ fi
             workspace_root: cache_root,
             builder_bundle_root: bundle_root,
             app_executable_path: PathBuf::from("/opt/codex-desktop/electron"),
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
         let dmg_path = temp.path().join("Codex.dmg");
         fs::write(&dmg_path, b"dmg")?;
@@ -702,6 +716,14 @@ fi
         assert!(artifacts
             .workspace_dir
             .join("builder/scripts/rebuild-candidate.sh")
+            .exists());
+        assert!(artifacts
+            .workspace_dir
+            .join("builder/CHANGELOG.md")
+            .exists());
+        assert!(artifacts
+            .workspace_dir
+            .join("builder/.codex-linux/source-info.json")
             .exists());
         assert!(artifacts
             .workspace_dir

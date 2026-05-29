@@ -98,6 +98,22 @@ pub struct PersistedState {
     pub cli_error_message: Option<String>,
     #[serde(default)]
     pub cli_prompt_dismissed_at: Option<DateTime<Utc>>,
+    /// Wrapper (repo) version currently installed, when known.
+    #[serde(default)]
+    pub installed_wrapper_version: Option<String>,
+    /// Wrapper commit currently installed, when known.
+    #[serde(default)]
+    pub installed_wrapper_commit: Option<String>,
+    /// Newer wrapper version detected upstream, when one is available.
+    #[serde(default)]
+    pub candidate_wrapper_version: Option<String>,
+    /// Newer wrapper commit detected upstream, when one is available.
+    #[serde(default)]
+    pub candidate_wrapper_commit: Option<String>,
+    /// Changelog (curated sections or git subjects) for the detected wrapper
+    /// update.
+    #[serde(default)]
+    pub wrapper_changelog: Option<String>,
 }
 
 impl PersistedState {
@@ -126,6 +142,11 @@ impl PersistedState {
             cli_last_verified_at: None,
             cli_error_message: None,
             cli_prompt_dismissed_at: None,
+            installed_wrapper_version: None,
+            installed_wrapper_commit: None,
+            candidate_wrapper_version: None,
+            candidate_wrapper_commit: None,
+            wrapper_changelog: None,
         }
     }
 
@@ -154,6 +175,13 @@ impl PersistedState {
         self.status = UpdateStatus::Failed;
         self.waiting_for_app_exit_auto_install = false;
         self.error_message = Some(message.into());
+    }
+
+    /// Clears the currently advertised wrapper update candidate.
+    pub fn clear_wrapper_update_candidate(&mut self) {
+        self.candidate_wrapper_version = None;
+        self.candidate_wrapper_commit = None;
+        self.wrapper_changelog = None;
     }
 }
 

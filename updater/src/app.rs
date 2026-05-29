@@ -7,7 +7,7 @@ use crate::{
     config::{RuntimeConfig, RuntimePaths},
     install, install_rollback, liveness, logging, notify, rollback,
     state::{CliStatus, PersistedState, UpdateStatus},
-    upstream,
+    upstream, wrapper,
 };
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -48,6 +48,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::CheckNow { if_stale } => {
             run_check_now(&config, &mut state, &paths, if_stale).await
         }
+        Commands::CheckWrapper { json } => run_check_wrapper(&config, &mut state, &paths, json),
         Commands::CliPreflight {
             cli_path,
             print_path,
@@ -63,7 +64,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             cli_path,
             print_path,
         } => run_prompt_install_cli(&mut state, &paths, cli_path, print_path),
-        Commands::Status { json } => run_status(&mut state, &paths, json),
+        Commands::Status { json } => run_status(&config, &mut state, &paths, json),
         Commands::InstallReady => run_install_ready(&config, &mut state, &paths).await,
         Commands::Rollback => rollback::run(&config, &mut state, &paths).await,
         Commands::InstallDeb { path } => install::install_deb(&path),
@@ -140,6 +141,39 @@ fn maybe_prune_workspace_cache(workspace_root: &Path, state: &PersistedState) {
             );
         }
     }
+}
+
+fn clear_wrapper_update_candidate_and_persist(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+) -> Result<()> {
+    let original_state = state.clone();
+    state.clear_wrapper_update_candidate();
+    persist_if_changed(paths, state, &original_state)
+}
+
+fn refresh_installed_wrapper_state(config: &RuntimeConfig, state: &mut PersistedState) {
+    if let Some(installed) = wrapper::installed_wrapper_from_metadata(
+        &config.app_executable_path,
+        &config.builder_bundle_root,
+    ) {
+        state.installed_wrapper_version = installed.version;
+        state.installed_wrapper_commit = Some(installed.commit);
+    } else {
+        state.installed_wrapper_version = None;
+        state.installed_wrapper_commit = None;
+    }
+}
+
+fn clear_stale_wrapper_update_and_persist(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+) -> Result<()> {
+    let original_state = state.clone();
+    refresh_installed_wrapper_state(config, state);
+    state.clear_wrapper_update_candidate();
+    persist_if_changed(paths, state, &original_state)
 }
 
 fn set_status(
@@ -306,11 +340,128 @@ async fn run_check_now(
     maybe_notify_cli_missing(state, paths, config.notifications)?;
     maybe_notify_installed(state, paths, config.notifications)?;
     if if_stale && upstream_check_is_fresh(config, state) {
+        if let Err(error) = detect_and_record_wrapper_update(config, state, paths) {
+            warn!(
+                ?error,
+                "wrapper update detection failed during fresh check-now"
+            );
+        }
         info!("skipping check-now because the last successful upstream check is still fresh");
         return reconcile_pending_install(config, state, paths).await;
     }
     run_check_cycle(config, state, paths).await?;
     reconcile_pending_install(config, state, paths).await
+}
+
+/// Detects a newer wrapper release and records it into state. Returns
+/// `Ok(true)` when an update was found and recorded. No-ops (returning
+/// `Ok(false)`) when wrapper tracking is disabled, the builder bundle is not a
+/// git checkout, or no newer commit is available. Never mutates the checkout.
+fn detect_and_record_wrapper_update(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+) -> Result<bool> {
+    if !config.enable_wrapper_updates {
+        clear_wrapper_update_candidate_and_persist(state, paths)?;
+        return Ok(false);
+    }
+
+    let Some(installed) = wrapper::installed_wrapper_from_metadata(
+        &config.app_executable_path,
+        &config.builder_bundle_root,
+    ) else {
+        clear_stale_wrapper_update_and_persist(config, state, paths)?;
+        return Ok(false);
+    };
+
+    let update = match wrapper::detect_from_bundle_root(
+        &config.builder_bundle_root,
+        &installed,
+        &config.wrapper_remote,
+        &config.wrapper_branch,
+    ) {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            clear_stale_wrapper_update_and_persist(config, state, paths)?;
+            return Ok(false);
+        }
+        Err(error) => {
+            warn!(?error, "wrapper update detection failed");
+            clear_stale_wrapper_update_and_persist(config, state, paths)?;
+            return Ok(false);
+        }
+    };
+
+    let original_state = state.clone();
+    state.installed_wrapper_version = update.installed_version.clone();
+    state.installed_wrapper_commit = Some(update.installed_commit.clone());
+    state.candidate_wrapper_version = update.candidate_version.clone();
+    state.candidate_wrapper_commit = Some(update.candidate_commit.clone());
+    state.wrapper_changelog = Some(update.changelog.clone());
+    persist_if_changed(paths, state, &original_state)?;
+
+    let change_count = update
+        .changelog
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    maybe_notify(
+        state,
+        paths,
+        config.notifications,
+        &format!("wrapper_update:{}", update.candidate_commit),
+        "Codex Desktop wrapper update available",
+        &format!(
+            "A newer Linux wrapper build is available ({change_count} change(s)). Rebuild to apply."
+        ),
+    )?;
+
+    Ok(true)
+}
+
+fn run_check_wrapper(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    json: bool,
+) -> Result<()> {
+    if !config.enable_wrapper_updates {
+        clear_wrapper_update_candidate_and_persist(state, paths)?;
+        if json {
+            println!("{}", serde_json::json!({ "enabled": false }));
+        } else {
+            println!(
+                "Wrapper update tracking is disabled (set enable_wrapper_updates = true in config.toml)."
+            );
+        }
+        return Ok(());
+    }
+
+    let found = detect_and_record_wrapper_update(config, state, paths)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(state)?);
+    } else if found {
+        println!(
+            "wrapper update available: {} -> {}",
+            state
+                .installed_wrapper_commit
+                .as_deref()
+                .unwrap_or("unknown"),
+            state
+                .candidate_wrapper_commit
+                .as_deref()
+                .unwrap_or("unknown")
+        );
+        if let Some(changelog) = state.wrapper_changelog.as_deref() {
+            println!("\n{changelog}");
+        }
+    } else {
+        println!("wrapper is up to date (or not a git checkout).");
+    }
+
+    Ok(())
 }
 
 fn upstream_check_is_fresh(config: &RuntimeConfig, state: &PersistedState) -> bool {
@@ -322,10 +473,18 @@ fn upstream_check_is_fresh(config: &RuntimeConfig, state: &PersistedState) -> bo
     Utc::now().signed_duration_since(last_successful_check_at) < freshness_window
 }
 
-fn run_status(state: &mut PersistedState, paths: &RuntimePaths, json: bool) -> Result<()> {
+fn run_status(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    json: bool,
+) -> Result<()> {
     codex_cli::reconcile_if_present(state, paths)?;
     complete_pending_install_if_already_installed(state, paths)?;
     normalize_workspace_dir_and_persist(state, paths)?;
+    if !config.enable_wrapper_updates {
+        clear_wrapper_update_candidate_and_persist(state, paths)?;
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(state)?);
@@ -566,6 +725,12 @@ async fn run_check_cycle(
     state: &mut PersistedState,
     paths: &RuntimePaths,
 ) -> Result<()> {
+    // Keep wrapper state fresh even while a DMG package is pending; otherwise
+    // `status --json` could keep advertising stale wrapper candidates.
+    if let Err(error) = detect_and_record_wrapper_update(config, state, paths) {
+        warn!(?error, "wrapper update detection failed during check cycle");
+    }
+
     if update_install_is_pending(&state.status) {
         info!("skipping upstream check because an update is already pending");
         return Ok(());
@@ -1265,6 +1430,33 @@ fn notify_failure(
 mod tests {
     use super::*;
 
+    fn test_paths(root: &std::path::Path) -> RuntimePaths {
+        RuntimePaths {
+            config_file: root.join("config/config.toml"),
+            state_file: root.join("state/state.json"),
+            log_file: root.join("state/service.log"),
+            cache_dir: root.join("cache"),
+            state_dir: root.join("state"),
+            config_dir: root.join("config"),
+        }
+    }
+
+    fn test_config(root: &std::path::Path) -> RuntimeConfig {
+        RuntimeConfig {
+            dmg_url: "https://example.com/Codex.dmg".to_string(),
+            initial_check_delay_seconds: 1,
+            check_interval_hours: 6,
+            auto_install_on_app_exit: true,
+            notifications: false,
+            workspace_root: root.join("cache"),
+            builder_bundle_root: root.join("builder"),
+            app_executable_path: root.join("not-running-electron"),
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
+        }
+    }
+
     #[test]
     fn upstream_check_freshness_respects_configured_interval() {
         let config = RuntimeConfig {
@@ -1276,6 +1468,9 @@ mod tests {
             workspace_root: std::path::PathBuf::from("/tmp/cache"),
             builder_bundle_root: std::path::PathBuf::from("/tmp/builder"),
             app_executable_path: std::path::PathBuf::from("/tmp/electron"),
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
 
         let mut state = PersistedState::new(true);
@@ -1286,6 +1481,114 @@ mod tests {
 
         state.last_successful_check_at = Some(Utc::now() - ChronoDuration::hours(7));
         assert!(!upstream_check_is_fresh(&config, &state));
+    }
+
+    #[test]
+    fn disabled_wrapper_tracking_clears_stale_candidate() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = test_paths(temp.path());
+        paths.ensure_dirs()?;
+        let config = test_config(temp.path());
+
+        let mut state = PersistedState::new(true);
+        state.installed_wrapper_commit = Some("installed".to_string());
+        state.candidate_wrapper_commit = Some("stale".to_string());
+        state.candidate_wrapper_version = Some("0.9.0".to_string());
+        state.wrapper_changelog = Some("old changelog".to_string());
+
+        let found = detect_and_record_wrapper_update(&config, &mut state, &paths)?;
+
+        assert!(!found);
+        assert_eq!(state.installed_wrapper_commit.as_deref(), Some("installed"));
+        assert_eq!(state.candidate_wrapper_commit, None);
+        assert_eq!(state.candidate_wrapper_version, None);
+        assert_eq!(state.wrapper_changelog, None);
+
+        let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
+        assert_eq!(persisted.candidate_wrapper_commit, None);
+        assert_eq!(persisted.wrapper_changelog, None);
+        Ok(())
+    }
+
+    #[test]
+    fn no_wrapper_update_clears_stale_candidate() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = test_paths(temp.path());
+        paths.ensure_dirs()?;
+        let mut config = test_config(temp.path());
+        config.enable_wrapper_updates = true;
+        std::fs::create_dir_all(&config.builder_bundle_root)?;
+
+        let mut state = PersistedState::new(true);
+        state.installed_wrapper_commit = Some("old-installed".to_string());
+        state.candidate_wrapper_commit = Some("stale".to_string());
+        state.candidate_wrapper_version = Some("0.9.0".to_string());
+        state.wrapper_changelog = Some("old changelog".to_string());
+
+        let found = detect_and_record_wrapper_update(&config, &mut state, &paths)?;
+
+        assert!(!found);
+        assert_eq!(state.installed_wrapper_commit, None);
+        assert_eq!(state.installed_wrapper_version, None);
+        assert_eq!(state.candidate_wrapper_commit, None);
+        assert_eq!(state.candidate_wrapper_version, None);
+        assert_eq!(state.wrapper_changelog, None);
+
+        let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
+        assert_eq!(persisted.installed_wrapper_commit, None);
+        assert_eq!(persisted.candidate_wrapper_commit, None);
+        assert_eq!(persisted.wrapper_changelog, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_dmg_update_still_clears_stale_wrapper_candidate() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = test_paths(temp.path());
+        paths.ensure_dirs()?;
+        let config = test_config(temp.path());
+
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::ReadyToInstall;
+        state.candidate_wrapper_commit = Some("stale".to_string());
+        state.candidate_wrapper_version = Some("0.9.0".to_string());
+        state.wrapper_changelog = Some("old changelog".to_string());
+
+        run_check_cycle(&config, &mut state, &paths).await?;
+
+        assert_eq!(state.status, UpdateStatus::ReadyToInstall);
+        assert_eq!(state.candidate_wrapper_commit, None);
+        assert_eq!(state.candidate_wrapper_version, None);
+        assert_eq!(state.wrapper_changelog, None);
+        let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
+        assert_eq!(persisted.candidate_wrapper_commit, None);
+        assert_eq!(persisted.wrapper_changelog, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fresh_check_now_still_clears_stale_wrapper_candidate() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = test_paths(temp.path());
+        paths.ensure_dirs()?;
+        let config = test_config(temp.path());
+
+        let mut state = PersistedState::new(true);
+        state.last_successful_check_at = Some(Utc::now());
+        state.candidate_wrapper_commit = Some("stale".to_string());
+        state.candidate_wrapper_version = Some("0.9.0".to_string());
+        state.wrapper_changelog = Some("old changelog".to_string());
+
+        run_check_now(&config, &mut state, &paths, true).await?;
+
+        assert_eq!(state.status, UpdateStatus::Idle);
+        assert_eq!(state.candidate_wrapper_commit, None);
+        assert_eq!(state.candidate_wrapper_version, None);
+        assert_eq!(state.wrapper_changelog, None);
+        let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
+        assert_eq!(persisted.candidate_wrapper_commit, None);
+        assert_eq!(persisted.wrapper_changelog, None);
+        Ok(())
     }
 
     #[test]
@@ -1333,6 +1636,9 @@ mod tests {
             workspace_root: temp.path().join("cache"),
             builder_bundle_root: temp.path().join("builder"),
             app_executable_path: temp.path().join("not-running-electron"),
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
 
         let mut state = PersistedState::new(false);
@@ -1370,6 +1676,9 @@ mod tests {
             workspace_root: temp.path().join("cache"),
             builder_bundle_root: temp.path().join("builder"),
             app_executable_path: temp.path().join("not-running-electron"),
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
 
         for status in [
@@ -1470,6 +1779,9 @@ mod tests {
             workspace_root: temp.path().join("cache"),
             builder_bundle_root: temp.path().join("builder"),
             app_executable_path: temp.path().join("not-running-electron"),
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
 
         let mut state = PersistedState::new(true);
@@ -1526,6 +1838,9 @@ mod tests {
             workspace_root: temp.path().join("cache"),
             builder_bundle_root: temp.path().join("builder"),
             app_executable_path: temp.path().join("not-running-electron"),
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
 
         let mut state = PersistedState::new(false);
@@ -1586,6 +1901,9 @@ mod tests {
             workspace_root: temp.path().join("cache"),
             builder_bundle_root: temp.path().join("builder"),
             app_executable_path: std::env::current_exe()?,
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
 
         let mut state = PersistedState::new(true);
@@ -1650,6 +1968,9 @@ mod tests {
             workspace_root: temp.path().join("cache"),
             builder_bundle_root: temp.path().join("builder"),
             app_executable_path: std::env::current_exe()?,
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
 
         let mut state = PersistedState::new(true);
@@ -1714,6 +2035,9 @@ mod tests {
             workspace_root: temp.path().join("cache"),
             builder_bundle_root: temp.path().join("builder"),
             app_executable_path: std::env::current_exe()?,
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
 
         let mut state = PersistedState::new(false);
@@ -1766,6 +2090,9 @@ mod tests {
             workspace_root: temp.path().join("cache"),
             builder_bundle_root: temp.path().join("builder"),
             app_executable_path: temp.path().join("not-running-electron"),
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
 
         let mut state = PersistedState::new(true);
@@ -1826,6 +2153,9 @@ mod tests {
             workspace_root: temp.path().join("cache"),
             builder_bundle_root: temp.path().join("builder"),
             app_executable_path: std::env::current_exe()?,
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
 
         let mut state = PersistedState::new(false);
@@ -1866,6 +2196,9 @@ mod tests {
             workspace_root: temp.path().join("cache"),
             builder_bundle_root: temp.path().join("builder"),
             app_executable_path: temp.path().join("not-running-electron"),
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
 
         let mut state = PersistedState::new(false);
@@ -2165,7 +2498,8 @@ mod tests {
         std::env::remove_var("CODEX_CLI_PATH");
         std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
 
-        let result = run_status(&mut state, &paths, true);
+        let config = test_config(temp.path());
+        let result = run_status(&config, &mut state, &paths, true);
 
         if let Some(home) = original_home {
             std::env::set_var("HOME", home);
@@ -2248,9 +2582,10 @@ mod tests {
         std::env::remove_var("CODEX_CLI_PATH");
         std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
 
+        let config = test_config(temp.path());
         let mut state = PersistedState::new(true);
         state.cli_path = Some(codex_path);
-        let result = run_status(&mut state, &paths, true);
+        let result = run_status(&config, &mut state, &paths, true);
 
         if let Some(home) = original_home {
             std::env::set_var("HOME", home);

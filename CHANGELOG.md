@@ -20,6 +20,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `~/.config/<appId>/settings.json` as `codex-linux-auto-update-on-exit`, and
   `codex-update-manager` rereads it during reconciliation as an overlay over
   `config.toml` so the in-app preference wins without restarting the service.
+- `codex-update-manager` can now track newer *wrapper* releases (this repo's own
+  Linux features and fixes) in addition to the upstream Codex DMG. Opt in with
+  `enable_wrapper_updates = true` in `config.toml`; a new `check-wrapper`
+  subcommand and the `status --json` output report the detected wrapper commit
+  and a changelog of what changed. Detection is git-based, requires the remote
+  candidate to descend from the installed checkout, clears stale candidates
+  when no update is currently valid, uses timeout-bound non-interactive git
+  commands, prefers curated `CHANGELOG.md` sections newer than the installed
+  version, and falls back to git commit subjects. Packaged frozen bundles
+  without a git checkout degrade gracefully (no wrapper tracking; updates arrive
+  via a normal package upgrade).
 - Launcher rendering mode `CODEX_LINUX_RENDERING_MODE=wayland-gpu`, which
   forces native Wayland with GPU compositing enabled and skips forced renderer
   accessibility by default for Wayland desktops where XWayland or software
