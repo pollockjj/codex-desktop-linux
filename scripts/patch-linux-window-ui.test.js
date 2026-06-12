@@ -21,7 +21,6 @@ const {
   applyLinuxDesktopSettingsIndexPatch,
   applyLinuxAvatarOverlayMousePassthroughPatch,
   applyBrowserUseNodeReplApprovalPatch,
-  applyLinuxBrowserUseIabVisibleOnCreatePatch,
   applyLinuxBrowserUseRouteLivenessPatch,
   applyLinuxChromeExtensionStatusPatch,
   applyLinuxChromeNativeHostRuntimePatch,
@@ -93,6 +92,8 @@ const {
   sourceInfo,
 } = require("./lib/build-info.js");
 const {
+  criticalFailuresFromReport,
+  optionalDriftFromReport,
   summarizePatchReport,
 } = require("./lib/patch-report.js");
 const {
@@ -1057,7 +1058,7 @@ function avatarOverlayBundleFixture() {
     "setElementSize(e,{mascot:t,tray:n}){let r=this.window;r==null||r.isDestroyed()||r.webContents.id!==e||(this.cancelMomentum(),this.anchor={...this.anchor,width:t.width,height:t.height},this.mascotSize=t,this.traySize=n,this.applyLayout(r))}",
     "async createWindow(e){let t=await this.windowManager.createWindow({title:n.app.getName(),width:zB.width,height:zB.height,appearance:`avatarOverlay`,focusable:!1,show:!1,initialRoute:rV,hostId:this.windowManager.getHostIdForWebContents(e)??`local`});return this.window=t,this.rendererReady=this.windowManager.isWebContentsReady(t.webContents.id),this.dragState=null,this.layout=null,this.mascotSize=oV,this.mousePassthroughEnabled=!1,this.placement=`top-end`,this.pointerInteractive=!1,this.traySize=null,t.once(`ready-to-show`,()=>{t.isDestroyed()||!this.rendererReady||(this.showWindow(t),this.applyPointerInteractivityPolicy())}),t.on(`closed`,()=>{this.window===t&&(this.cancelMomentum(),this.window=null,this.dragState=null,this.layout=null,this.rendererReady=!1,this.pointerInteractive=!1,this.mousePassthroughEnabled=!1,this.globalState.set(Te,!1),this.broadcastOpenState())}),t}",
     "applyLayout(e,t=n.screen.getDisplayNearestPoint(hV(this.anchor)).bounds){if(e.isDestroyed())return;let r=UB({anchor:this.anchor,displayBounds:t,mascotSize:this.mascotSize,previousPlacement:this.placement,traySize:this.traySize??sV});this.anchor=r.anchor,this.layout=r,this.placement=r.placement,this.setWindowBounds(e,r.windowBounds),this.sendLayoutToRenderer(e)}getLayout(e){if(this.layout??this.applyLayout(e),this.layout==null)throw Error(`Expected avatar overlay layout`);return this.layout}",
-    "showWindow(e){if(e.isDestroyed())return;let t=this.isOpen();e.moveTop(),e.showInactive(),!t&&this.isOpen()&&this.broadcastOpenState()}broadcastOpenState(){this.windowManager.sendMessageToAllRegisteredWindows({type:`avatar-overlay-open-state-changed`,isOpen:this.isOpen()})}",
+    "showWindow(e){if(e.isDestroyed())return;let t=this.isOpen();e.moveTop(),e.showInactive(),!t&&this.isOpen()&&this.broadcastOpenState()}showWindowIfReady(e){!this.rendererReady||(this.showWindow(e),this.applyPointerInteractivityPolicy())}broadcastOpenState(){this.windowManager.sendMessageToAllRegisteredWindows({type:`avatar-overlay-open-state-changed`,isOpen:this.isOpen()})}",
     "applyPointerInteractivityPolicy(){let e=this.window;if(e==null||e.isDestroyed()){this.mousePassthroughEnabled=!1;return}let t=!this.pointerInteractive;if(this.mousePassthroughEnabled!==t){if(this.mousePassthroughEnabled=t,t){e.setIgnoreMouseEvents(!0,{forward:!0});return}e.setIgnoreMouseEvents(!1),this.refreshCursorAtCurrentMousePosition(e)}}",
     "refreshCursorAtCurrentMousePosition(e){if(e.isDestroyed())return;let t=n.screen.getCursorScreenPoint(),r=e.getContentBounds(),i=t.x-r.x,a=t.y-r.y;i<0||a<0||i>r.width||a>r.height||e.webContents.sendInputEvent({type:`mouseMove`,x:i,y:a,movementX:0,movementY:0})}",
     "};",
@@ -1370,6 +1371,62 @@ test("updates the Linux native titlebar overlay when nativeTheme changes", () =>
   );
   assert.doesNotMatch(patched, /webContents\.executeJavaScript\(/);
   assert.doesNotMatch(patched, /data-codex-window-type/);
+});
+
+test("redirects the renamed Linux-aware titlebar overlay sync away from the transparent win32 helper", () => {
+  const source = [
+    "function A2(e){return e===`avatarOverlay`}",
+    "function I2({platform:e,appearance:t,opaqueWindowsEnabled:n,prefersDarkColors:r}){return n&&!A2(t)&&(e===`darwin`||e===`win32`)?{backgroundColor:r?a2:o2,backgroundMaterial:e===`win32`?`none`:null}:e===`linux`&&!A2(t)?{backgroundColor:r?a2:o2,backgroundMaterial:null}:{backgroundColor:i2,backgroundMaterial:null}}",
+    "function b2(e=1){return{color:i2,symbolColor:a.nativeTheme.shouldUseDarkColors?v2:_2,height:Math.round(g2*e)}}",
+    "case`primary`:return n===`darwin`?t?{titleBarStyle:`hiddenInset`,trafficLightPosition:y2(r)}:{vibrancy:`menu`,titleBarStyle:`hiddenInset`,trafficLightPosition:y2(r)}:n===`win32`||n===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:b2(r)}:{titleBarStyle:`default`};",
+    "installApplicationMenuTitleBarOverlaySync(e,t){if(process.platform!==`win32`&&process.platform!==`linux`||t!==`primary`)return;let n=()=>{e.isDestroyed()||e.setTitleBarOverlay(b2(this.windowZooms.get(e.id)))};return a.nativeTheme.on(`updated`,n),n(),()=>{a.nativeTheme.off(`updated`,n)}}",
+    "process.platform===`darwin`?n.setWindowButtonPosition(y2(t)):(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(n.id,t),n.setTitleBarOverlay(b2(t)))",
+  ].join("");
+  const { value: patched, warnings } = captureWarns(() =>
+    applyPatchTwice(applyLinuxNativeTitlebarPatch, source),
+  );
+
+  assert.match(
+    patched,
+    /n===`linux`\?\{titleBarStyle:`hidden`,titleBarOverlay:codexLinuxTitleBarOverlay\(r\)\}/,
+  );
+  assert.match(
+    patched,
+    /installApplicationMenuTitleBarOverlaySync\(e,t\)\{if\(\(process\.platform!==`win32`&&process\.platform!==`linux`\)\|\|t!==`primary`\)return/,
+  );
+  assert.match(
+    patched,
+    /e\.setTitleBarOverlay\(process\.platform===`linux`\?codexLinuxTitleBarOverlay\(this\.windowZooms\.get\(e\.id\)\):b2\(this\.windowZooms\.get\(e\.id\)\)\)/,
+  );
+  assert.match(
+    patched,
+    /n\.setTitleBarOverlay\(process\.platform===`linux`\?codexLinuxTitleBarOverlay\(t\):b2\(t\)\)/,
+  );
+  assert.doesNotMatch(patched, /setTitleBarOverlay\(b2\(/);
+  assert.deepEqual(warnings, []);
+});
+
+
+test("updates every Linux zoom titlebar overlay refresh call site", () => {
+  const source = [
+    "function A2(e){return e===`avatarOverlay`}",
+    "function I2({platform:e,appearance:t,opaqueWindowsEnabled:n,prefersDarkColors:r}){return n&&!A2(t)&&(e===`darwin`||e===`win32`)?{backgroundColor:r?a2:o2,backgroundMaterial:e===`win32`?`none`:null}:e===`linux`&&!A2(t)?{backgroundColor:r?a2:o2,backgroundMaterial:null}:{backgroundColor:i2,backgroundMaterial:null}}",
+    "function b2(e=1){return{color:i2,symbolColor:a.nativeTheme.shouldUseDarkColors?v2:_2,height:Math.round(g2*e)}}",
+    "case`primary`:return n===`darwin`?t?{titleBarStyle:`hiddenInset`,trafficLightPosition:y2(r)}:{vibrancy:`menu`,titleBarStyle:`hiddenInset`,trafficLightPosition:y2(r)}:n===`win32`||n===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:b2(r)}:{titleBarStyle:`default`};",
+    "installApplicationMenuTitleBarOverlaySync(e,t){if(process.platform!==`win32`&&process.platform!==`linux`||t!==`primary`)return;let n=()=>{e.isDestroyed()||e.setTitleBarOverlay(b2(this.windowZooms.get(e.id)))};return a.nativeTheme.on(`updated`,n),n(),()=>{a.nativeTheme.off(`updated`,n)}}",
+    "process.platform===`darwin`?n.setWindowButtonPosition(y2(t)):(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(n.id,t),n.setTitleBarOverlay(b2(t)))",
+    "process.platform===`darwin`?o.setWindowButtonPosition(y2(i)):(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(o.id,i),o.setTitleBarOverlay(b2(i)))",
+  ].join("");
+  const patched = applyPatchTwice(applyLinuxNativeTitlebarPatch, source);
+
+  assert.equal(
+    (patched.match(/setTitleBarOverlay\(process\.platform===`linux`\?codexLinuxTitleBarOverlay/g) ?? []).length,
+    3,
+  );
+  assert.doesNotMatch(
+    patched,
+    /\(process\.platform===`win32`\|\|process\.platform===`linux`\)&&\(this\.windowZooms\.set\([^)]+\),[A-Za-z_$][\w$]*\.setTitleBarOverlay\(b2\([^)]+\)\)\)/,
+  );
 });
 
 test("adds a right-side safe area for Linux window controls in application menu chrome", () => {
@@ -1687,9 +1744,11 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
   assert.doesNotMatch(patched, /let\[,l,u,d,f\]=c/);
   assert.doesNotMatch(patched, /this\.codexLinuxIsI3Session\(\)\)\{this\.codexLinuxStopAvatarPassthroughRecovery\(\),this\.codexLinuxAvatarInputShapeKey=null,this\.pointerInteractive=!0,this\.mousePassthroughEnabled&&\(this\.mousePassthroughEnabled=!1\),e\.setIgnoreMouseEvents\(!1\);return\}/);
   assert.match(patched, /if\(process\.platform===`linux`&&typeof e\.setShape==`function`\)\{/);
+  assert.match(patched, /if\(process\.platform===`linux`&&typeof e\.setShape==`function`\)\{this\.codexLinuxStartAvatarPassthroughRecovery\(\),/);
+  assert.doesNotMatch(patched, /if\(process\.platform===`linux`&&typeof e\.setShape==`function`\)\{this\.codexLinuxStopAvatarPassthroughRecovery\(\),/);
   assert.doesNotMatch(patched, /typeof e\.setShape==`function`&&!this\.codexLinuxIsI3Session\(\)/);
   assert.match(patched, /if\(t==null\)return null/);
-  assert.match(patched, /if\(t==null\)return!1;let n=JSON\.stringify\(t\)/);
+  assert.match(patched, /try\{let t=this\.codexLinuxBuildAvatarInputShape\(e\);if\(t==null\)return!1;let n=JSON\.stringify\(t\)/);
   assert.match(patched, /e\.setShape\(t\),this\.codexLinuxAvatarInputShapeKey=n;return!0/);
   assert.match(patched, /return\[i\(t\.mascot\),i\(t\.tray\)\]\.filter\(Boolean\)/);
   assert.match(patched, /process\.platform!==`linux`/);
@@ -1698,6 +1757,9 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
   assert.doesNotMatch(patched, /typeof e\.setShape==`function`\)return;this\.codexLinuxAvatarPassthroughRecoveryTimer=setInterval/);
   assert.match(patched, /this\.dragState!=null/);
   assert.match(patched, /this\.codexLinuxIsCursorInAvatarInteractiveRegion\(e\)/);
+  assert.match(patched, /__codexWindowHit=__codexX>=0&&__codexY>=0&&__codexX<=__codexBounds\.width&&__codexY<=__codexBounds\.height/);
+  assert.match(patched, /return __codexHit\(t\.mascot\)\|\|__codexHit\(t\.tray\)\|\|__codexWindowHit/);
+  assert.doesNotMatch(patched, /let r=r\.screen\.getCursorScreenPoint\(\)/);
   assert.match(patched, /catch\{t=!0\}/);
   assert.match(patched, /this\.pointerInteractive=t/);
   assert.match(patched, /displayBounds:n\.screen\.getDisplayNearestPoint\(n\.screen\.getCursorScreenPoint\(\)\)\.bounds\},process\.platform===`linux`&&\(this\.pointerInteractive=!0,this\.applyPointerInteractivityPolicy\(\)\)\}moveDrag\(e\)/);
@@ -1709,6 +1771,95 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
   assert.match(patched, /e\.moveTop\(\),e\.showInactive\(\),process\.platform===`linux`&&this\.codexLinuxApplyAvatarCompositorHints\(e\),process\.platform===`linux`&&this\.applyPointerInteractivityPolicy\(\)/);
   assert.doesNotMatch(patched, /codexLinuxRecoverAvatarPointerInteractivity/);
   assert.match(patched, /this\.window===t&&\(this\.codexLinuxStopAvatarPassthroughRecovery\(\),this\.codexLinuxAvatarInputShapeKey=null,this\.codexLinuxAvatarCompositorHintsApplied=!1,this\.codexLinuxAvatarCompositorHintsApplying=!1,this\.cancelMomentum\(\)/);
+});
+
+test("Linux avatar overlay treats visible window content as interactive fallback", () => {
+  const patched = applyPatchTwice(
+    applyLinuxAvatarOverlayMousePassthroughPatch,
+    avatarOverlayBundleFixture(),
+  );
+  const context = {
+    globalThis: {},
+    process: {
+      env: {},
+      pid: 123,
+      platform: "linux",
+    },
+    require(moduleName) {
+      assert.equal(moduleName, "node:child_process");
+      return { execFile() {} };
+    },
+    pV(bounds) {
+      return bounds;
+    },
+    n: {
+      app: {
+        getName: () => "Codex",
+      },
+      screen: {
+        getCursorScreenPoint: () => ({ x: 5765, y: 1088 }),
+        getDisplayNearestPoint: () => ({ bounds: { x: 0, y: 0, width: 800, height: 600 } }),
+      },
+    },
+  };
+  vm.runInNewContext(`${patched};globalThis.AvatarOverlayController=fV;`, context);
+
+  const controller = new context.globalThis.AvatarOverlayController(
+    { sendMessageToAllRegisteredWindows() {} },
+    { set() {} },
+  );
+  controller.layout = {
+    mascot: { left: 220, top: 190, width: 113, height: 122 },
+    tray: { left: 57, top: 55, width: 276, height: 131 },
+  };
+
+  assert.equal(
+    controller.codexLinuxIsCursorInAvatarInteractiveRegion({
+      getContentBounds: () => ({ x: 5743, y: 936, width: 356, height: 320 }),
+    }),
+    true,
+  );
+  assert.equal(
+    controller.codexLinuxIsCursorInAvatarInteractiveRegion({
+      getContentBounds: () => ({ x: 6000, y: 936, width: 100, height: 100 }),
+    }),
+    false,
+  );
+
+  const overlayWindow = {
+    isDestroyed: () => false,
+    getContentBounds: () => ({ x: 5743, y: 936, width: 356, height: 320 }),
+    setShape() {},
+  };
+  const serializeShape = (shape) => JSON.parse(JSON.stringify(shape));
+  assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
+    { x: 220, y: 190, width: 113, height: 122 },
+    { x: 57, y: 55, width: 276, height: 131 },
+  ]);
+  controller.pointerInteractive = true;
+  assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
+    { x: 0, y: 0, width: 356, height: 320 },
+  ]);
+  assert.equal(
+    controller.codexLinuxApplyAvatarInputShape({
+      isDestroyed: () => false,
+      getContentBounds: () => {
+        throw new Error("drift");
+      },
+      setShape() {},
+    }),
+    false,
+  );
+  assert.equal(
+    controller.codexLinuxApplyAvatarInputShape({
+      isDestroyed: () => false,
+      getContentBounds: () => ({ x: 5743, y: 936, width: 356, height: 320 }),
+      setShape() {
+        throw new Error("unsupported");
+      },
+    }),
+    false,
+  );
 });
 
 test("keeps avatar overlay layout sync working after layout alias drift", () => {
@@ -2808,7 +2959,7 @@ test("shows the profile dropdown settings route on Linux", () => {
 
 test("removes unsupported features from default app-server feature sync", () => {
   const source = [
-    "var GF=[`apps`,`auth_elicitation`,`enable_mcp_apps`,`memories`,`mentions_v2`,`plugins`,`remote_control`,`tool_call_mcp_elicitation`,`tool_search`,`tool_suggest`,te];",
+    "var GF=[`apps`,`auth_elicitation`,`enable_mcp_apps`,`memories`,`mentions_v2`,`plugins`,`remote_control`,`remote_plugin`,`tool_call_mcp_elicitation`,`tool_search`,`tool_suggest`,te];",
     "function KF(){let e=(0,Z.c)(6),t=K(G),[n]=ts(`statsig_default_enable_features`),r=Lc(),i=Io(),a,o;",
     "return e[0]!==r?(a=()=>{let r=qF(n);qn(`set-experimental-feature-enablement-for-host`,{hostId:t,enablement:r}).catch(n=>{q.error(`Failed to sync experimental feature enablement`,{sensitive:{error:n}})})},o=[r],e[0]=r,e[1]=a,e[2]=o):(a=e[1],o=e[2]),null}",
     "function qF(e){let t={};for(let n of GF){let r=e[n];r!=null&&(t[n]=r)}return t}",
@@ -2818,7 +2969,7 @@ test("removes unsupported features from default app-server feature sync", () => 
 
   assert.match(
     patched,
-    /var GF=\[`apps`,`memories`,`mentions_v2`,`plugins`,`remote_control`,`tool_call_mcp_elicitation`,`tool_suggest`\];/,
+    /var GF=\[`apps`,`memories`,`mentions_v2`,`plugins`,`remote_control`,`remote_plugin`,`tool_call_mcp_elicitation`,`tool_suggest`\];/,
   );
   assert.doesNotMatch(patched, /`auth_elicitation`/);
   assert.doesNotMatch(patched, /`enable_mcp_apps`/);
@@ -2846,7 +2997,7 @@ test("patches the matched app-server feature sync array when an identical array 
   assert.match(patched, new RegExp(`function OF\\(\\)\\{return GF\\}${escapeRegExp(supportedFeatureArray)}function KF`));
 });
 
-test("removes unsupported dynamic extra from current app-server feature sync", () => {
+test("preserves supported dynamic remote_plugin in current app-server feature sync", () => {
   const source = [
     "var GF=[`apps`,`memories`,`plugins`,`tool_call_mcp_elicitation`,`tool_suggest`],vI=`remote_plugin`;",
     "function KF(){let e=(0,Z.c)(6),t=K(G),[n]=ts(`statsig_default_enable_features`),r=Lc(),i=Io(),a,o;",
@@ -2856,9 +3007,22 @@ test("removes unsupported dynamic extra from current app-server feature sync", (
 
   const patched = applyPatchTwice(applyLinuxAppServerFeatureEnablementPatch, source);
 
-  assert.notEqual(patched, source);
-  assert.match(patched, /function qF\(e,t\)\{let n=\{\};for\(let r of GF\)\{let i=e\[r\];i!=null&&\(n\[r\]=i\)\}return n\}/);
-  assert.doesNotMatch(patched, /n\[vI\]=t/);
+  assert.equal(patched, source);
+  assert.match(patched, /n\[vI\]=t/);
+});
+
+test("preserves dynamic remote_plugin when the minified feature key contains regex syntax", () => {
+  const source = [
+    "var GF=[`apps`,`memories`,`plugins`,`tool_call_mcp_elicitation`,`tool_suggest`],v$I=`remote_plugin`;",
+    "function KF(){let e=(0,Z.c)(6),t=K(G),[n]=ts(`statsig_default_enable_features`),r=Lc(),i=Io(),a,o;",
+    "return e[0]!==r?(a=()=>{let r=qF(n,!0);qn(`set-experimental-feature-enablement-for-host`,{hostId:t,enablement:r})},o=[r],e[0]=r,e[1]=a,e[2]=o):(a=e[1],o=e[2]),null}",
+    "function qF(e,t){let n={};for(let r of GF){let i=e[r];i!=null&&(n[r]=i)}return n[v$I]=t,n}",
+  ].join("");
+
+  const patched = applyPatchTwice(applyLinuxAppServerFeatureEnablementPatch, source);
+
+  assert.equal(patched, source);
+  assert.match(patched, /n\[v\$I\]=t/);
 });
 
 test("keeps already-sanitized dynamic app-server feature sync quiet", () => {
@@ -3459,7 +3623,7 @@ test("uses Linux managed runtime paths for current Chrome native host sync shape
   });
 });
 
-test("reports drifted Chrome native host runtime resolver as required upstream failure", () => {
+test("reports drifted Chrome native host runtime resolver as optional drift", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-patch-report-chrome-runtime-drift-"));
   try {
     const buildDir = path.join(tempRoot, ".vite", "build");
@@ -3476,12 +3640,17 @@ test("reports drifted Chrome native host runtime resolver as required upstream f
     captureWarns(() => patchExtractedApp(tempRoot, { report }));
 
     const runtimePatch = report.patches.find((patch) => patch.name === "linux-chrome-native-host-runtime");
-    assert.equal(runtimePatch.status, "failed-required");
+    assert.equal(runtimePatch.status, "skipped-optional");
     assert.match(runtimePatch.reason, /Could not identify Chrome native host runtime resolver shape/);
     assert.ok(
-      validateReport(report, "upstream-build").some((failure) =>
-        failure.startsWith("linux-chrome-native-host-runtime: failed-required"),
+      !validateReport(report, "upstream-build").some((failure) =>
+        failure.startsWith("linux-chrome-native-host-runtime:"),
       ),
+      "browser integration drift must not fail the build",
+    );
+    assert.ok(
+      optionalDriftFromReport(report).some((drift) => drift.name === "linux-chrome-native-host-runtime"),
+      "the drift must still be surfaced in the optional-drift summary",
     );
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -3539,7 +3708,7 @@ test("handles literal Chrome plugin gate names", () => {
   assert.doesNotMatch(patched, /installWhenMissing:!0,name:'chrome-internal'/);
 });
 
-test("reports missing required Chrome plugin auto-install gate as required upstream validation failure", () => {
+test("reports missing Chrome plugin auto-install gate as optional drift", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-patch-report-missing-chrome-"));
   try {
     const buildDir = path.join(tempRoot, ".vite", "build");
@@ -3550,12 +3719,16 @@ test("reports missing required Chrome plugin auto-install gate as required upstr
     captureWarns(() => patchExtractedApp(tempRoot, { report }));
 
     const pluginGatePatch = report.patches.find((patch) => patch.name === "linux-chrome-plugin-auto-install");
-    assert.equal(pluginGatePatch.status, "failed-required");
+    assert.equal(pluginGatePatch.status, "skipped-optional");
     assert.match(pluginGatePatch.reason, /Could not find Chrome plugin gate literal/);
     assert.ok(
-      validateReport(report, "upstream-build").some((failure) =>
-        failure.startsWith("linux-chrome-plugin-auto-install: failed-required"),
+      !validateReport(report, "upstream-build").some((failure) =>
+        failure.startsWith("linux-chrome-plugin-auto-install:"),
       ),
+      "browser integration drift must not fail the build",
+    );
+    assert.ok(
+      optionalDriftFromReport(report).some((drift) => drift.name === "linux-chrome-plugin-auto-install"),
     );
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -3582,7 +3755,7 @@ test("fails hard when the Computer Use gate is recognizable but unpatchable", ()
   );
 });
 
-test("reports missing required Computer Use plugin gate as required upstream validation failure", () => {
+test("reports missing Computer Use plugin gate as optional drift", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-patch-report-missing-computer-use-"));
   try {
     const buildDir = path.join(tempRoot, ".vite", "build");
@@ -3593,12 +3766,16 @@ test("reports missing required Computer Use plugin gate as required upstream val
     captureWarns(() => patchExtractedApp(tempRoot, { report }));
 
     const pluginGatePatch = report.patches.find((patch) => patch.name === "linux-computer-use-plugin-gate");
-    assert.equal(pluginGatePatch.status, "failed-required");
+    assert.equal(pluginGatePatch.status, "skipped-optional");
     assert.match(pluginGatePatch.reason, /Could not find Computer Use plugin gate literal/);
     assert.ok(
-      validateReport(report, "upstream-build").some((failure) =>
-        failure.startsWith("linux-computer-use-plugin-gate: failed-required"),
+      !validateReport(report, "upstream-build").some((failure) =>
+        failure.startsWith("linux-computer-use-plugin-gate:"),
       ),
+      "Computer Use is a feature — its drift must not fail the build",
+    );
+    assert.ok(
+      optionalDriftFromReport(report).some((drift) => drift.name === "linux-computer-use-plugin-gate"),
     );
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -3997,12 +4174,6 @@ test("trusts Linux patched bundled Browser Use clients by hashing staged files",
   } finally {
     fs.rmSync(resourcesRoot, { recursive: true, force: true });
   }
-});
-
-test("keeps removed IAB visible patch export as a no-op", () => {
-  const source = "class BrowserSessionRegistry{}";
-
-  assert.equal(applyLinuxBrowserUseIabVisibleOnCreatePatch(source), source);
 });
 
 test("patchMainBundleSource does not force the in-app browser panel visible", () => {
@@ -4505,15 +4676,19 @@ test("patchExtractedApp records a structured patch report", () => {
     assert.equal(report.iconAsset, "app-test.png");
     assert.equal(report.desktopName, "codex-desktop.desktop");
     assert.deepEqual(report.enabledFeatures, enabledLinuxFeatureIds());
+    // Browser/Computer Use integration drift is optional: the aggregate stays
+    // applied because no required main-bundle patch warned on this fixture.
     assert.ok(
       report.patches.some(
         (patch) =>
           patch.name === "main-process-ui" &&
-          patch.status === "failed-required" &&
+          patch.status === "applied" &&
           patch.sourceKind === "core" &&
-          Array.isArray(patch.warnings) &&
-          patch.warnings.length > 0,
+          patch.warnings === undefined,
       ),
+    );
+    assert.ok(
+      optionalDriftFromReport(report).some((drift) => drift.name === "linux-chrome-plugin-auto-install"),
     );
     assert.ok(report.patches.some((patch) => patch.name === "keybinds-settings" && patch.status === "skipped-optional"));
   } finally {
@@ -4769,25 +4944,6 @@ test("patch report marks warned asset patches as required failures", () => {
   }
 });
 
-test("persistent rate limit footer uses existing account signal without dropdown copy", () => {
-  const source = [
-    'import{A as Do,E as Oo,I as ko,L as Ao,M as jo,N as Mo,P as No,S as Po,W as Fo,_ as Io,a as Lo,c as Ro,d as zo,f as Bo,g as Vo,h as Ho,j as Uo,l as Wo,m as Go,o as Ko,p as qo,r as Jo,s as Yo,t as Xo,u as Zo,v as Qo,x as $o,y as es}from"./rate-limit-rows-HF3Xhn3F.js";',
-    "function TF(e){let t=(0,Z.c)(148),",
-    "t[131]!==Ut||t[132]!==Wt||t[133]!==Gt?(Kt=(0,Q.jsxs)(`div`,{className:`flex min-w-0 flex-1 flex-nowrap items-center gap-1`,children:[Ut,Wt,Gt]}),t[131]=Ut,t[132]=Wt,t[133]=Gt,t[134]=Kt):Kt=t[134]",
-    "(0,Q.jsx)(nz,{conversationId:f,hostId:C,cwdOverride:w}),(0,Q.jsx)(vz,{conversationId:f,hasGoal:y,isGoalActionAvailable:b,onClearGoal:x,showDivider:!0})",
-  ].join("");
-
-  const patched = applyPatchTwice(applyPersistentRateLimitFooterPatch, source);
-
-  assert.match(patched, /function codexLinuxRateLimitFooter/);
-  assert.match(patched, /catch\(e\)\{return null\}/);
-  assert.match(patched, /\{data:a=null\}=li\(Fn\)/);
-  assert.match(patched, /c=Xo\(Jo\(o,\{activeLimitName:s,selectedModel:i\}\)\)\.slice\(0,2\)/);
-  assert.doesNotMatch(patched, /codexLinuxUseRateLimitStatus/);
-  assert.doesNotMatch(patched, /codex-linux-rate-limit-footer/);
-  assert.equal((patched.match(/Rate limits remaining/g) || []).length, 1);
-});
-
 test("persistent rate limit footer descriptor ignores external footer chunks", () => {
   const descriptor = corePatchDescriptors().find(
     (candidate) => candidate.id === "composer-persistent-rate-limit-footer",
@@ -4797,158 +4953,6 @@ test("persistent rate limit footer descriptor ignores external footer chunks", (
   assert.equal(descriptor.pattern.test("composer-D1QtVouy.js"), true);
   descriptor.pattern.lastIndex = 0;
   assert.equal(descriptor.pattern.test("composer-external-footer-0Iw5VZtp.js"), false);
-});
-
-test("persistent rate limit footer skips current footer group when conversation id is missing", () => {
-  const source = [
-    "var Z=Ai();var Q=Hr();",
-    "function H_(e){let t=(0,Z.c)(6),{minutes:n,variant:r}=e,i=$i(),a;t[0]!==i||t[1]!==n||t[2]!==r?(a=Uo({intl:i,minutes:n,variant:r}),t[0]=i,t[1]=n,t[2]=r,t[3]=a):a=t[3];let o;return t[4]===a?o=t[5]:(o=(0,Q.jsx)(Q.Fragment,{children:a}),t[4]=a,t[5]=o),o}",
-    "function U_(e){let t=(0,Z.c)(75),{rateLimits:n,activeLimitName:r,planType:i,suppressUpsell:a,selectedModel:o}=e;return null}",
-    "function IG({activeCollaborationMode:t}){let le=t?.settings.model??null,{data:ue}=Oc(),{data:de}=ci(jn),fe=Qo(de),pe=Bo(de,le),me=de?.rate_limit_reached_type?.type,he=me!=null&&me!==`rate_limit_reached`,ge=ue?.structure===`workspace`&&Io(de)&&!es(de)&&!he,_e=fe&&!ge,ve=pe&&!ge,ye=Ro(de),be=Zo(de),xe=Ko(ye,{activeLimitName:be,selectedModel:le}),Se=Lo(ye,{activeLimitName:be,selectedModel:le});",
-    "let Ut=xt,Wt=null,Gt=yt,Kt;t[131]!==Ut||t[132]!==Wt||t[133]!==Gt?(Kt=(0,Q.jsxs)(`div`,{className:`flex min-w-0 flex-1 flex-nowrap items-center gap-1`,children:[Ut,Wt,Gt]}),t[131]=Ut,t[132]=Wt,t[133]=Gt,t[134]=Kt):Kt=t[134];return Kt}",
-  ].join("");
-
-  const patched = applyPatchTwice(applyPersistentRateLimitFooterPatch, source);
-
-  assert.match(patched, /function codexLinuxRateLimitFooter\(\{conversationId:e\}\)/);
-  assert.match(patched, /catch\(e\)\{return null\}/);
-  assert.match(patched, /\{activeMode:n\}=Bi\(e\),r=n\?\.settings\.model\?\?null,\{data:i\}=ci\(jn\)/);
-  assert.doesNotMatch(patched, /codexLinuxRateLimitFooter,\{conversationId:z\}/);
-  assert.match(patched, /children:\[Ut,Wt,Gt\]/);
-  assert.match(patched, /\(0,Q\.jsx\)\(H_,\{minutes:e\.bucket\.windowDurationMins,variant:`summary`\}\)/);
-  assert.doesNotMatch(patched, /w===`home`\?\(0,Q\.jsx\)\(codexLinuxRateLimitFooter/);
-  assert.doesNotMatch(patched, /rateLimitEntries:ye/);
-});
-
-test("persistent rate limit footer adapts to current composer conversation id symbols", () => {
-  const source = [
-    "var Z=Ai();var Q=Hr();",
-    "function H_(e){let t=(0,Z.c)(6),{minutes:n,variant:r}=e,i=$i(),a;t[0]!==i||t[1]!==n||t[2]!==r?(a=Uo({intl:i,minutes:n,variant:r}),t[0]=i,t[1]=n,t[2]=r,t[3]=a):a=t[3];let o;return t[4]===a?o=t[5]:(o=(0,Q.jsx)(Q.Fragment,{children:a}),t[4]=a,t[5]=o),o}",
-    "function U_(e){let t=(0,Z.c)(75),{rateLimits:n,activeLimitName:r,planType:i,suppressUpsell:a,selectedModel:o}=e;return null}",
-    "function EF(e){let t=(0,Z.c)(148),{conversationId:a,activeCollaborationMode:o}=e,r=o?.settings.model??null,{data:de}=ci(jn),ye=Ro(de),be=Zo(de),xe=Ko(ye,{activeLimitName:be,selectedModel:r}),Se=Lo(ye,{activeLimitName:be,selectedModel:r}),R=M?.type===`local`?M.localConversationId:null,z=R??a,B=oi(fn,z);",
-    "let Ut=xt,Wt=null,Gt=yt,Kt;t[131]!==Ut||t[132]!==Wt||t[133]!==Gt?(Kt=(0,Q.jsxs)(`div`,{className:`flex min-w-0 flex-1 flex-nowrap items-center gap-1`,children:[Ut,Wt,Gt]}),t[131]=Ut,t[132]=Wt,t[133]=Gt,t[134]=Kt):Kt=t[134];return Kt}",
-  ].join("");
-
-  const patched = applyPatchTwice(applyPersistentRateLimitFooterPatch, source);
-
-  assert.match(patched, /function codexLinuxRateLimitFooter\(\{conversationId:e\}\)/);
-  assert.match(patched, /catch\(e\)\{return null\}/);
-  assert.match(patched, /codexLinuxRateLimitFooter,\{conversationId:z\}/);
-  assert.match(patched, /Kt=\(0,Q\.jsxs\)\(`div`,\{className:`flex min-w-0 flex-1 flex-nowrap items-center gap-1`,children:\[Ut,\(0,Q\.jsx\)\(codexLinuxRateLimitFooter,\{conversationId:z\}\),Wt,Gt\]\}\)/);
-  assert.doesNotMatch(patched, /t\[131\]!==Ut\|\|t\[132\]!==Wt\|\|t\[133\]!==Gt\?\(Kt=.*codexLinuxRateLimitFooter/);
-  assert.doesNotMatch(patched, /children:\[Ut,Wt,Gt\]/);
-});
-
-test("persistent rate limit footer migrates broken current composer calls", () => {
-  const source = [
-    "var Z=Ai();var Q=Hr();",
-    "function H_(e){let t=(0,Z.c)(6),{minutes:n,variant:r}=e,i=$i(),a;t[0]!==i||t[1]!==n||t[2]!==r?(a=Uo({intl:i,minutes:n,variant:r}),t[0]=i,t[1]=n,t[2]=r,t[3]=a):a=t[3];let o;return t[4]===a?o=t[5]:(o=(0,Q.jsx)(Q.Fragment,{children:a}),t[4]=a,t[5]=o),o}",
-    "function U_(e){let t=(0,Z.c)(75),{rateLimits:n,activeLimitName:r,planType:i,suppressUpsell:a,selectedModel:o}=e;return null}",
-    "function IG({activeCollaborationMode:t}){let z=ci(Zt),le=t?.settings.model??null,{data:ue}=Oc(),{data:de}=ci(jn),fe=Qo(de),pe=Bo(de,le),me=de?.rate_limit_reached_type?.type,he=me!=null&&me!==`rate_limit_reached`,ge=ue?.structure===`workspace`&&Io(de)&&!es(de)&&!he,_e=fe&&!ge,ve=pe&&!ge,ye=Ro(de),be=Zo(de),xe=Ko(ye,{activeLimitName:be,selectedModel:le}),Se=Lo(ye,{activeLimitName:be,selectedModel:le});",
-    "let Ut=xt,Wt=null,Gt=yt,Kt;Kt=(0,Q.jsxs)(`div`,{className:`flex min-w-0 flex-1 flex-nowrap items-center gap-1`,children:[Ut,w===`home`?(0,Q.jsx)(codexLinuxRateLimitFooter,{conversationId:z}):null,Wt,Gt]});return Kt}",
-  ].join("");
-
-  const patched = applyPatchTwice(applyPersistentRateLimitFooterPatch, source);
-
-  assert.match(patched, /function codexLinuxRateLimitFooter/);
-  assert.match(patched, /catch\(e\)\{return null\}/);
-  assert.match(patched, /codexLinuxRateLimitFooter,\{conversationId:z\}/);
-  assert.doesNotMatch(patched, /w===`home`\?\(0,Q\.jsx\)\(codexLinuxRateLimitFooter/);
-  assert.doesNotMatch(patched, /codexLinuxRateLimitFooter,\{rateLimitEntries:/);
-});
-
-test("persistent rate limit footer upgrades existing current helper to guarded helper", () => {
-  const oldHelper =
-    "function codexLinuxRateLimitFooter({conversationId:e}){let t=(0,Z.c)(22),{activeMode:n}=Bi(e),r=n?.settings.model??null,{data:i}=ci(jn);return null}";
-  const source = [
-    "var Z=Ai();var Q=Hr();",
-    "function H_(e){let t=(0,Z.c)(6),{minutes:n,variant:r}=e,i=$i(),a;t[0]!==i||t[1]!==n||t[2]!==r?(a=Uo({intl:i,minutes:n,variant:r}),t[0]=i,t[1]=n,t[2]=r,t[3]=a):a=t[3];let o;return t[4]===a?o=t[5]:(o=(0,Q.jsx)(Q.Fragment,{children:a}),t[4]=a,t[5]=o),o}",
-    oldHelper,
-    "function U_(e){let t=(0,Z.c)(75),{rateLimits:n,activeLimitName:r,planType:i,suppressUpsell:a,selectedModel:o}=e;return null}",
-    "function IG({activeCollaborationMode:t}){let z=ci(Zt),le=t?.settings.model??null,{data:ue}=Oc(),{data:de}=ci(jn),fe=Qo(de),pe=Bo(de,le),me=de?.rate_limit_reached_type?.type,he=me!=null&&me!==`rate_limit_reached`,ge=ue?.structure===`workspace`&&Io(de)&&!es(de)&&!he,_e=fe&&!ge,ve=pe&&!ge,ye=Ro(de),be=Zo(de),xe=Ko(ye,{activeLimitName:be,selectedModel:le}),Se=Lo(ye,{activeLimitName:be,selectedModel:le});",
-    "let Ut=xt,Wt=null,Gt=yt,Kt;Kt=(0,Q.jsxs)(`div`,{className:`flex min-w-0 flex-1 flex-nowrap items-center gap-1`,children:[Ut,(0,Q.jsx)(codexLinuxRateLimitFooter,{conversationId:z}),Wt,Gt]});return Kt}",
-  ].join("");
-
-  const patched = applyPatchTwice(applyPersistentRateLimitFooterPatch, source);
-
-  assert.equal((patched.match(/function codexLinuxRateLimitFooter/g) || []).length, 1);
-  assert.match(patched, /catch\(e\)\{return null\}/);
-  assert.match(patched, /\{activeMode:n\}=Bi\(e\),r=n\?\.settings\.model\?\?null,\{data:i\}=ci\(jn\)/);
-  assert.doesNotMatch(patched, /function codexLinuxRateLimitFooter\(\{conversationId:e\}\)\{let t=/);
-});
-
-test("persistent rate limit footer repairs incorrectly adapted current composer calls", () => {
-  const brokenHelper =
-    "function codexLinuxRateLimitFooter({rateLimitEntries:e,activeLimitName:t,selectedModel:n}){let r=(0,Z.c)(20),i=Jo(e,{activeLimitName:t,selectedModel:n}),a=Xo(i).slice(0,2);if(a.length===0)return null;return a}";
-  const source = [
-    "var Z=Ai();var Q=Hr();",
-    "function H_(e){let t=(0,Z.c)(6),{minutes:n,variant:r}=e,i=$i(),a;t[0]!==i||t[1]!==n||t[2]!==r?(a=Uo({intl:i,minutes:n,variant:r}),t[0]=i,t[1]=n,t[2]=r,t[3]=a):a=t[3];let o;return t[4]===a?o=t[5]:(o=(0,Q.jsx)(Q.Fragment,{children:a}),t[4]=a,t[5]=o),o}",
-    brokenHelper,
-    "function U_(e){let t=(0,Z.c)(75),{rateLimits:n,activeLimitName:r,planType:i,suppressUpsell:a,selectedModel:o}=e;return null}",
-    "function IG({activeCollaborationMode:t}){let z=ci(Zt),le=t?.settings.model??null,{data:ue}=Oc(),{data:de}=ci(jn),fe=Qo(de),pe=Bo(de,le),me=de?.rate_limit_reached_type?.type,he=me!=null&&me!==`rate_limit_reached`,ge=ue?.structure===`workspace`&&Io(de)&&!es(de)&&!he,_e=fe&&!ge,ve=pe&&!ge,ye=Ro(de),be=Zo(de),xe=Ko(ye,{activeLimitName:be,selectedModel:le}),Se=Lo(ye,{activeLimitName:be,selectedModel:le});",
-    "let Ut=xt,Wt=null,Gt=yt,Kt;Kt=(0,Q.jsxs)(`div`,{className:`flex min-w-0 flex-1 flex-nowrap items-center gap-1`,children:[Ut,w===`home`?(0,Q.jsx)(codexLinuxRateLimitFooter,{rateLimitEntries:ye,activeLimitName:be,selectedModel:le}):null,Wt,Gt]});return Kt}",
-  ].join("");
-
-  const patched = applyPatchTwice(applyPersistentRateLimitFooterPatch, source);
-
-  assert.match(patched, /function codexLinuxRateLimitFooter\(\{conversationId:e\}\)/);
-  assert.match(patched, /codexLinuxRateLimitFooter,\{conversationId:z\}/);
-  assert.doesNotMatch(patched, /w===`home`\?\(0,Q\.jsx\)\(codexLinuxRateLimitFooter/);
-  assert.doesNotMatch(patched, /rateLimitEntries:e/);
-  assert.doesNotMatch(patched, /rateLimitEntries:ye/);
-});
-
-test("persistent rate limit footer adapts to current composer status toolbar shape", () => {
-  const source = [
-    "function zg(e){let t=(0,$.c)(29),{conversationId:n,threadId:r,rateLimit:i,onOpenChange:a}=e,o=Et(),[s,c]=(0,Z.useState)(!1),{activeMode:l}=or(n),u=l?.settings.model??null,d=Ct(E,n),f;t[0]===d?f=t[1]:(f=wc(d),t[0]=d,t[1]=f);let p=f,m,h;if(t[2]!==i||t[3]!==u){let e=sa(i),n=ta(i),r=da(e,{activeLimitName:n,selectedModel:u});m=Oo(r),h=la(r,{activeLimitName:n,selectedModel:u}),t[2]=i,t[3]=u,t[4]=m,t[5]=h}else m=t[4],h=t[5];let g=h;return g}",
-    "function Bg(e){let t=(0,$.c)(110),{agentMode:n,composerMode:i,currentLocalExecutionCwd:o,currentLocalExecutionHostId:s,effectiveIdeContextStatus:c,effectiveIsAutoContextOn:l,isGoalActionAvailable:u,onOpenGoalEditor:d,resolvedCwd:f,setIsAutoContextOn:p,setIsStatusMenuOpen:m,skillLookupRoots:h}=e,g=Ot(Y),_=pc(),v=qt(),y=dc(_,Vg),b=Dt(Zn),x=b?.type===`local`?b.localConversationId:null,S=Jt(),{data:w}=Dt(le),T=k(s),E=yr(x),D;t[0]===E.hostId?D=t[1]:(D={hostId:E.hostId},t[0]=E.hostId,t[1]=D);let O=1,A=2,j=3,M=4,N=5,P=6,F=7,L=8,te=9,ne=10,re=11,ie=`thread`,R=12,z=13,B=14,V=15,ae=16,oe=17,U=18,se=19,ce=20,ue=21,de=22,W=23,fe=24,pe=25,me=26,G=27,he=28,_e=29,ve=30,ye=31,xe=32,Se=33,Ce=34,we=35,Te=36,Ee=37,De=w??null,Oe;t[73]!==x||t[74]!==m||t[75]!==ie||t[76]!==De?(Oe=(0,Q.jsx)(zg,{conversationId:x,threadId:ie,rateLimit:De,onOpenChange:m}),t[73]=x,t[74]=m,t[75]=ie,t[76]=De,t[77]=Oe):Oe=t[77];let Ae=38,je=39,Me=40,Ne;return t[91]!==W||t[92]!==pe||t[93]!==G||t[94]!==he||t[95]!==_e||t[96]!==ve||t[97]!==ye||t[98]!==xe||t[99]!==Se||t[100]!==Ce||t[101]!==we||t[102]!==Te||t[103]!==Ee||t[104]!==Oe||t[105]!==Ae||t[106]!==je||t[107]!==Me||t[108]!==ue?(Ne=(0,Q.jsxs)(Q.Fragment,{children:[ue,de,W,fe,pe,me,G,he,_e,ve,ye,xe,Se,Ce,we,Te,Ee,Oe,Ae,je,Me]}),t[91]=W,t[92]=pe,t[93]=G,t[94]=he,t[95]=_e,t[96]=ve,t[97]=ye,t[98]=xe,t[99]=Se,t[100]=Ce,t[101]=we,t[102]=Te,t[103]=Ee,t[104]=Oe,t[105]=Ae,t[106]=je,t[107]=Me,t[108]=ue,t[109]=Ne):Ne=t[109],Ne}",
-  ].join("");
-
-  const patched = applyPatchTwice(applyPersistentRateLimitFooterPatch, source);
-
-  assert.match(
-    patched,
-    /function codexLinuxRateLimitFooter\(\{conversationId:e,rateLimit:t\}\)\{try\{let n=Et\(\),\{activeMode:r\}=or\(e\),i=r\?\.settings\.model\?\?null,a=sa\(t\),o=ta\(t\),s=da\(a,\{activeLimitName:o,selectedModel:i\}\),c=s\.filter\(kg\)\.slice\(0,2\);/,
-  );
-  assert.match(
-    patched,
-    /children:\[ue,de,W,fe,pe,me,G,he,_e,ve,ye,xe,Se,Ce,we,Te,Ee,De==null\?null:\(0,Q\.jsx\)\(codexLinuxRateLimitFooter,\{conversationId:x,rateLimit:De\}\),Oe,Ae,je,Me\]/,
-  );
-});
-
-test("persistent rate limit footer skips composer patch when helper cannot be inserted", () => {
-  const source = [
-    "function Cz(e){let t=(0,Z.c)(148),",
-    "t[131]!==Ut||t[132]!==Wt||t[133]!==Gt?(Kt=(0,Q.jsxs)(`div`,{className:`flex min-w-0 flex-1 flex-nowrap items-center gap-1`,children:[Ut,Wt,Gt]}),t[131]=Ut,t[132]=Wt,t[133]=Gt,t[134]=Kt):Kt=t[134]",
-    "(0,Q.jsx)(nz,{conversationId:f,hostId:C,cwdOverride:w}),(0,Q.jsx)(vz,{conversationId:f,hasGoal:y,isGoalActionAvailable:b,onClearGoal:x,showDivider:!0})",
-  ].join("");
-
-  const patched = applyPatchTwice(applyPersistentRateLimitFooterPatch, source);
-
-  assert.equal(patched, source);
-  assert.doesNotMatch(patched, /codexLinuxRateLimitFooter/);
-});
-
-test("persistent rate limit footer adapts to current composer permissions footer shape", () => {
-  const source = [
-    "var $=qt();var Q=Hr();",
-    "function Xv({activeCollaborationMode:t}){let Te=t?.settings.model??null,{data:De}=Y(de),Ie=_a(De),ze=da(De),Be=ma(Ie,{activeLimitName:ze,selectedModel:Te}),Ue=ya(Ie,{activeLimitName:ze,selectedModel:Te});return Be??Ue}",
-    "function Sm(e){return e}",
-    "function Lm(e){let t=(0,$.c)(34),{composerMode:d,conversationId:f,hasGoal:y,isGoalActionAvailable:b,onClearGoal:x,permissionsHostId:C,permissionsCwdOverride:w,showPermissions:T}=e,E=T===void 0?!0:T,k=(0,Q.jsx)(Co,{conversationId:f}),A;t[22]!==d||t[23]!==f||t[24]!==y||t[25]!==b||t[26]!==x||t[27]!==w||t[28]!==C||t[29]!==E?(A=d===`cloud`?null:(0,Q.jsx)(Q.Fragment,{children:E?(0,Q.jsxs)(Q.Fragment,{children:[(0,Q.jsx)(Sm,{conversationId:f,hostId:C,cwdOverride:w}),(0,Q.jsx)(Rm,{conversationId:f,hasGoal:y,isGoalActionAvailable:b,onClearGoal:x,showDivider:!0})]}):null}),t[22]=d,t[23]=f,t[24]=y,t[25]=b,t[26]=x,t[27]=w,t[28]=C,t[29]=E,t[30]=A):A=t[30];let j;return t[31]!==k||t[32]!==A?(j=(0,Q.jsxs)(`div`,{className:`flex min-w-0 items-center gap-[5px]`,children:[k,A]}),t[31]=k,t[32]=A,t[33]=j):j=t[33],j}",
-    "function Rm(e){let t=(0,$.c)(16),{conversationId:n,hasGoal:r,isGoalActionAvailable:i,onClearGoal:a,showDivider:o}=e,{activeMode:s,modes:c,setSelectedMode:l}=cr(n);return l}",
-  ].join("");
-
-  const patched = applyPatchTwice(applyPersistentRateLimitFooterPatch, source);
-
-  assert.match(patched, /function codexLinuxRateLimitFooter\(\{conversationId:e\}\)/);
-  assert.match(
-    patched,
-    /\{data:n\}=Y\(de\),r=_a\(n\),i=da\(n\),a=ya\(r,\{activeLimitName:i,selectedModel:t\}\)/,
-  );
-  assert.match(
-    patched,
-    /\(0,Q\.jsx\)\(Sm,\{conversationId:f,hostId:C,cwdOverride:w\}\),f==null\?null:\(0,Q\.jsx\)\(codexLinuxRateLimitFooter,\{conversationId:f\}\),\(0,Q\.jsx\)\(Rm,\{conversationId:f,hasGoal:y,isGoalActionAvailable:b,onClearGoal:x,showDivider:!0\}\)/,
-  );
 });
 
 test("patcher CLI writes --report-json output", () => {
@@ -4985,4 +4989,379 @@ test("patcher CLI writes --report-json output", () => {
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+function writeCorePatchFixture(root, relativeDir, descriptorSource) {
+  const patchDir = path.join(root, relativeDir);
+  fs.mkdirSync(patchDir, { recursive: true });
+  fs.writeFileSync(path.join(patchDir, "patch.js"), descriptorSource);
+}
+
+test("engine catches a throwing optional patch and continues with later patches", () => {
+  const coreRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-throwing-optional-core-"));
+  const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-throwing-optional-app-"));
+  try {
+    writeCorePatchFixture(coreRoot, "sample/throwing", [
+      "\"use strict\";",
+      "module.exports = {",
+      "  id: \"throwing-optional-sample\",",
+      "  phase: \"main-bundle\",",
+      "  ciPolicy: \"optional\",",
+      "  order: 100,",
+      "  apply: () => { throw new Error(\"boom-optional\"); },",
+      "};",
+    ].join("\n"));
+    writeCorePatchFixture(coreRoot, "sample/following", [
+      "\"use strict\";",
+      "module.exports = {",
+      "  id: \"following-optional-sample\",",
+      "  phase: \"main-bundle\",",
+      "  ciPolicy: \"optional\",",
+      "  order: 200,",
+      "  apply: (source) => source.replace(\"codexLinuxFollowUp()\", \"codexLinuxFollowedUp()\"),",
+      "};",
+    ].join("\n"));
+
+    const buildDir = path.join(tempApp, ".vite", "build");
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.writeFileSync(path.join(buildDir, "main.js"), "codexLinuxFollowUp()");
+
+    const report = createPatchReport();
+    captureWarns(() => patchExtractedApp(tempApp, { report, corePatchRoot: coreRoot }));
+
+    const throwing = report.patches.find((patch) => patch.name === "throwing-optional-sample");
+    assert.equal(throwing?.status, "skipped-optional");
+    assert.equal(throwing?.error, true);
+    assert.match(throwing?.reason ?? "", /boom-optional/);
+
+    const following = report.patches.find((patch) => patch.name === "following-optional-sample");
+    assert.equal(following?.status, "applied", "engine must continue after an optional patch throws");
+    assert.match(fs.readFileSync(path.join(buildDir, "main.js"), "utf8"), /codexLinuxFollowedUp/);
+
+    assert.ok(
+      !criticalFailuresFromReport(report).some((failure) => failure.name === "throwing-optional-sample"),
+    );
+    assert.ok(
+      !validateReport(report, "upstream-build").some((failure) =>
+        failure.startsWith("throwing-optional-sample:"),
+      ),
+    );
+  } finally {
+    fs.rmSync(coreRoot, { recursive: true, force: true });
+    fs.rmSync(tempApp, { recursive: true, force: true });
+  }
+});
+
+test("engine records a throwing critical patch as failed-required without aborting", () => {
+  const coreRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-throwing-critical-core-"));
+  const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-throwing-critical-app-"));
+  try {
+    writeCorePatchFixture(coreRoot, "sample/critical", [
+      "\"use strict\";",
+      "module.exports = {",
+      "  id: \"throwing-critical-sample\",",
+      "  phase: \"main-bundle\",",
+      "  ciPolicy: \"required-upstream\",",
+      "  order: 100,",
+      "  apply: () => { throw new Error(\"boom-critical\"); },",
+      "};",
+    ].join("\n"));
+
+    const buildDir = path.join(tempApp, ".vite", "build");
+    fs.mkdirSync(buildDir, { recursive: true });
+    const originalSource = "codexLinuxCriticalFixture()";
+    fs.writeFileSync(path.join(buildDir, "main.js"), originalSource);
+
+    const report = createPatchReport();
+    captureWarns(() => patchExtractedApp(tempApp, { report, corePatchRoot: coreRoot }));
+
+    const entry = report.patches.find((patch) => patch.name === "throwing-critical-sample");
+    assert.equal(entry?.status, "failed-required");
+    assert.equal(entry?.error, true);
+    assert.match(entry?.reason ?? "", /boom-critical/);
+    assert.equal(
+      fs.readFileSync(path.join(buildDir, "main.js"), "utf8"),
+      originalSource,
+      "a throwing patch must contribute no partial edit",
+    );
+
+    assert.ok(
+      criticalFailuresFromReport(report).some((failure) => failure.name === "throwing-critical-sample"),
+    );
+    assert.ok(
+      validateReport(report, "upstream-build").some((failure) =>
+        failure.startsWith("throwing-critical-sample:"),
+      ),
+    );
+  } finally {
+    fs.rmSync(coreRoot, { recursive: true, force: true });
+    fs.rmSync(tempApp, { recursive: true, force: true });
+  }
+});
+
+test("a throwing webview-asset patch leaves no partially patched assets", () => {
+  const coreRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-throwing-asset-core-"));
+  const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-throwing-asset-app-"));
+  try {
+    writeCorePatchFixture(coreRoot, "sample/asset", [
+      "\"use strict\";",
+      "module.exports = {",
+      "  id: \"throwing-asset-sample\",",
+      "  phase: \"webview-asset\",",
+      "  ciPolicy: \"optional\",",
+      "  order: 100,",
+      "  pattern: /^demo-.*\\.js$/,",
+      "  apply: (source) => {",
+      "    if (source.includes(\"second\")) { throw new Error(\"boom-asset\"); }",
+      "    return source.replace(\"first\", \"first-patched\");",
+      "  },",
+      "};",
+    ].join("\n"));
+
+    const buildDir = path.join(tempApp, ".vite", "build");
+    const assetsDir = path.join(tempApp, "webview", "assets");
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.mkdirSync(assetsDir, { recursive: true });
+    fs.writeFileSync(path.join(buildDir, "main.js"), "codexLinuxAssetFixture()");
+    fs.writeFileSync(path.join(assetsDir, "demo-a.js"), "first asset");
+    fs.writeFileSync(path.join(assetsDir, "demo-b.js"), "second asset");
+
+    const report = createPatchReport();
+    captureWarns(() => patchExtractedApp(tempApp, { report, corePatchRoot: coreRoot }));
+
+    const entry = report.patches.find((patch) => patch.name === "throwing-asset-sample");
+    assert.equal(entry?.status, "skipped-optional");
+    assert.equal(entry?.error, true);
+    assert.equal(fs.readFileSync(path.join(assetsDir, "demo-a.js"), "utf8"), "first asset");
+    assert.equal(fs.readFileSync(path.join(assetsDir, "demo-b.js"), "utf8"), "second asset");
+  } finally {
+    fs.rmSync(coreRoot, { recursive: true, force: true });
+    fs.rmSync(tempApp, { recursive: true, force: true });
+  }
+});
+
+test("tray close-to-tray patch failure is engine-caught and does not abort patching", () => {
+  // Recognizable-but-unpatchable shape: both markers present, gate shape absent —
+  // applyLinuxTrayCloseSettingPatch throws, the engine must absorb it.
+  const source = "canHideLastLocalWindowToTray /* drifted */ console.log(`Launching app`)";
+  assert.throws(() => applyLinuxTrayCloseSettingPatch(source), /tray settings patch failed/);
+
+  const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-tray-close-throw-app-"));
+  try {
+    const buildDir = path.join(tempApp, ".vite", "build");
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.writeFileSync(path.join(buildDir, "main.js"), source);
+
+    const report = createPatchReport();
+    captureWarns(() => patchExtractedApp(tempApp, { report }));
+
+    const entry = report.patches.find((patch) => patch.name === "linux-tray-close-setting");
+    assert.equal(entry?.status, "skipped-optional");
+    assert.equal(entry?.error, true);
+    assert.ok(
+      !criticalFailuresFromReport(report).some((failure) => failure.name === "linux-tray-close-setting"),
+    );
+  } finally {
+    fs.rmSync(tempApp, { recursive: true, force: true });
+  }
+});
+
+test("criticalFailuresFromReport agrees with validateReport and skips non-applicable statuses", () => {
+  const report = {
+    patches: [
+      { name: "req-bad", status: "failed-required", ciPolicy: "required-upstream", reason: "anchor drifted" },
+      { name: "req-good", status: "applied", ciPolicy: "required-upstream" },
+      { name: "req-not-applicable", status: "skipped-target", ciPolicy: "required-upstream" },
+      { name: "opt-bad", status: "skipped-optional", ciPolicy: "optional", reason: "optional drift" },
+    ],
+  };
+
+  assert.deepEqual(criticalFailuresFromReport(report), [
+    { name: "req-bad", status: "failed-required", reason: "anchor drifted" },
+  ]);
+  assert.deepEqual(optionalDriftFromReport(report), [
+    { name: "opt-bad", status: "skipped-optional", reason: "optional drift" },
+  ]);
+
+  const failures = validateReport(report, "upstream-build");
+  assert.ok(failures.some((failure) => failure.startsWith("req-bad:")));
+  assert.ok(!failures.some((failure) => failure.startsWith("req-not-applicable:")));
+  assert.ok(!failures.some((failure) => failure.startsWith("opt-bad:")));
+});
+
+test("patchMainBundleSource survives a throwing optional patch without a report", () => {
+  const coreRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-throwing-no-report-core-"));
+  try {
+    writeCorePatchFixture(coreRoot, "sample/throwing", [
+      "\"use strict\";",
+      "module.exports = {",
+      "  id: \"throwing-no-report-sample\",",
+      "  phase: \"main-bundle\",",
+      "  ciPolicy: \"optional\",",
+      "  order: 100,",
+      "  apply: () => { throw new Error(\"boom-no-report\"); },",
+      "};",
+    ].join("\n"));
+
+    const source = "codexLinuxNoReportFixture()";
+    const { value: patched } = captureWarns(() =>
+      patchMainBundleSource(source, null, { corePatchRoot: coreRoot }),
+    );
+    assert.equal(patched, source);
+  } finally {
+    fs.rmSync(coreRoot, { recursive: true, force: true });
+  }
+});
+
+test("patcher CLI --enforce-critical exits non-zero with an aggregated message", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-enforce-critical-cli-test-"));
+  try {
+    const buildDir = path.join(tempRoot, ".vite", "build");
+    const assetsDir = path.join(tempRoot, "webview", "assets");
+    const reportPath = path.join(tempRoot, "reports", "patch-report.json");
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.mkdirSync(assetsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(buildDir, "main.js"),
+      [
+        mainBundlePrefix,
+        "process.platform===`win32`&&k.removeMenu(),",
+        alreadyOpaqueBackgroundBundle,
+        fileManagerBundle,
+        trayBundleFixture(),
+        singleInstanceBundleFixture(),
+      ].join(""),
+    );
+    fs.writeFileSync(path.join(tempRoot, "package.json"), JSON.stringify({ name: "codex" }));
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(__dirname, "patch-linux-window-ui.js"),
+        "--enforce-critical",
+        "--report-json",
+        reportPath,
+        tempRoot,
+      ],
+      { encoding: "utf8" },
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Critical patch failures \(\d+\):/);
+    assert.match(result.stderr, /failed-required/);
+    // The report must still be written for CI artifact upload despite the failure.
+    const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+    assert.ok(criticalFailuresFromReport(report).length > 0);
+
+    // Without the flag the same fixture must keep exiting 0 (fail-soft default).
+    const lenient = spawnSync(
+      process.execPath,
+      [path.join(__dirname, "patch-linux-window-ui.js"), tempRoot],
+      { encoding: "utf8" },
+    );
+    assert.equal(lenient.status, 0, lenient.stderr);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("a disabled patch is recorded as skipped-disabled and never counts as a critical failure", () => {
+  const coreRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-disabled-core-"));
+  const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-disabled-app-"));
+  try {
+    writeCorePatchFixture(coreRoot, "sample/disabled", [
+      "\"use strict\";",
+      "module.exports = {",
+      "  id: \"disabled-required-sample\",",
+      "  phase: \"main-bundle\",",
+      "  ciPolicy: \"required-upstream\",",
+      "  order: 100,",
+      "  enabled: () => false,",
+      "  apply: () => { throw new Error(\"must never run\"); },",
+      "};",
+    ].join("\n"));
+
+    const buildDir = path.join(tempApp, ".vite", "build");
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.writeFileSync(path.join(buildDir, "main.js"), "codexLinuxDisabledFixture()");
+
+    const report = createPatchReport();
+    captureWarns(() => patchExtractedApp(tempApp, { report, corePatchRoot: coreRoot }));
+
+    const entry = report.patches.find((patch) => patch.name === "disabled-required-sample");
+    assert.equal(entry?.status, "skipped-disabled");
+    assert.ok(
+      !criticalFailuresFromReport(report).some((failure) => failure.name === "disabled-required-sample"),
+      "a disabled patch is not applicable, so it must not fail the build",
+    );
+  } finally {
+    fs.rmSync(coreRoot, { recursive: true, force: true });
+    fs.rmSync(tempApp, { recursive: true, force: true });
+  }
+});
+
+test("strategy telemetry recorded during apply lands on the patch report entry", () => {
+  const coreRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-strategy-core-"));
+  const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-strategy-app-"));
+  try {
+    const telemetryPath = path.join(__dirname, "patches", "strategy-telemetry.js");
+    writeCorePatchFixture(coreRoot, "sample/instrumented", [
+      "\"use strict\";",
+      `const { recordStrategy } = require(${JSON.stringify(telemetryPath)});`,
+      "module.exports = {",
+      "  id: \"instrumented-sample\",",
+      "  phase: \"main-bundle\",",
+      "  ciPolicy: \"optional\",",
+      "  order: 100,",
+      "  apply: (source) => {",
+      "    recordStrategy(\"sample-group\", \"legacy:old-shape\");",
+      "    return source.replace(\"codexLinuxStrategyFixture()\", \"codexLinuxStrategyPatched()\");",
+      "  },",
+      "};",
+    ].join("\n"));
+
+    const buildDir = path.join(tempApp, ".vite", "build");
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.writeFileSync(path.join(buildDir, "main.js"), "codexLinuxStrategyFixture()");
+
+    const report = createPatchReport();
+    captureWarns(() => patchExtractedApp(tempApp, { report, corePatchRoot: coreRoot }));
+
+    const entry = report.patches.find((patch) => patch.name === "instrumented-sample");
+    assert.equal(entry?.status, "applied");
+    assert.deepEqual(entry?.strategies, [{ group: "sample-group", strategy: "legacy:old-shape" }]);
+  } finally {
+    fs.rmSync(coreRoot, { recursive: true, force: true });
+    fs.rmSync(tempApp, { recursive: true, force: true });
+  }
+});
+
+test("persistent rate limit footer adapts to the latest composer footer controls shape", () => {
+  const source = [
+    "function Wm(e){let t=(0,$.c)(12),{conversationId:n}=e,r=Qd(n),i=qd(n);",
+    "return (0,Q.jsx)(FooterInlineControls,{gap:`normal`,children:[Ab,Cb]})}",
+  ].join("");
+
+  const patched = applyPatchTwice(applyPersistentRateLimitFooterPatch, source);
+
+  assert.match(patched, /function codexLinuxRateLimitFooter\(\{conversationId:e\}\)/);
+  assert.match(
+    patched,
+    /FooterInlineControls,\{gap:`normal`,children:\[Ab,n==null\?null:\(0,Q\.jsx\)\(codexLinuxRateLimitFooter,\{conversationId:n\}\),Cb\]\}/,
+  );
+  assert.equal((patched.match(/codexLinuxRateLimitFooter,\{conversationId:n\}/g) || []).length, 1);
+});
+
+test("persistent rate limit footer warns when composer footer controls drift", () => {
+  const source =
+    "function Wm(e){let t=(0,$.c)(12);return (0,Q.jsx)(FooterInlineControls,{gap:`wide`,children:[Ab,Cb,Db]})}";
+
+  const { value: patched, warnings } = captureWarns(() =>
+    applyPersistentRateLimitFooterPatch(source),
+  );
+
+  assert.equal(patched, source);
+  assert.deepEqual(warnings, [
+    "WARN: Could not insert persistent rate limit footer helper — skipping composer footer limit patch",
+  ]);
 });

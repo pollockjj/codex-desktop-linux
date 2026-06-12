@@ -5081,6 +5081,28 @@ test_linux_file_manager_patch_fails_soft() {
     assert_contains "$output_log" 'Failed to apply Linux File Manager Patch'
 }
 
+test_patcher_enforce_critical_gate() {
+    info "Checking --enforce-critical patcher gate"
+    local workspace="$TMP_DIR/enforce-critical-gate"
+    local extracted="$workspace/extracted"
+    local output_log="$workspace/output.log"
+    local report_json="$workspace/reports/patch-report.json"
+    local status=0
+
+    mkdir -p "$workspace"
+    # Minimal fixture: most required patches cannot match, so enforcement must fail.
+    make_fake_extracted_asar "$extracted" 'let n=require(`electron`);process.platform===`win32`&&D.removeMenu(),'
+
+    # Bare invocation stays fail-soft (exit 0) — build scripts opt into enforcement.
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1 \
+        || fail "expected bare patcher invocation to stay fail-soft on this fixture"
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" --enforce-critical --report-json "$report_json" "$extracted" >"$output_log" 2>&1 || status=$?
+    [ "$status" -ne 0 ] || fail "expected --enforce-critical to exit non-zero on critical patch failures"
+    assert_contains "$output_log" 'Critical patch failures'
+    [ -f "$report_json" ] || fail "expected patch report to be written despite enforcement failure"
+}
+
 test_webview_probe_equivalence() {
     info "Checking webview probe behavioral equivalence (bash + curl vs python3 reference)"
     # The harness extracts webview_port_is_open and verify_webview_origin from
@@ -5944,6 +5966,7 @@ main() {
     test_linux_computer_use_gate_patch_smoke
     test_linux_computer_use_ui_opt_in_smoke
     test_linux_file_manager_patch_fails_soft
+    test_patcher_enforce_critical_gate
     test_user_local_prepare_build_repo_overlays_committed_local_changes
     test_user_local_prepare_build_repo_detects_default_branch_without_recorded_branch
     test_user_local_prepare_build_repo_ignores_stale_recorded_default_branch

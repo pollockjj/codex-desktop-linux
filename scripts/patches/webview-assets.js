@@ -1,9 +1,12 @@
 "use strict";
 
+const { recordStrategy } = require("./strategy-telemetry.js");
+
 const fs = require("node:fs");
 const path = require("node:path");
 
 const {
+  escapeRegExp,
   findMatchingBrace,
 } = require("./shared.js");
 
@@ -462,6 +465,7 @@ function applyLinuxAppServerFeatureEnablementPatch(currentSource) {
     "mentions_v2",
     "plugins",
     "remote_control",
+    "remote_plugin",
     "tool_call_mcp_elicitation",
     "tool_suggest",
   ]);
@@ -486,7 +490,14 @@ function applyLinuxAppServerFeatureEnablementPatch(currentSource) {
       /(for\(let ([A-Za-z_$][\w$]*) of [A-Za-z_$][\w$]*\)\{let ([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\[\2\];\3!=null&&\(([A-Za-z_$][\w$]*)\[\2\]=\3\)\})return \4\[([A-Za-z_$][\w$]*)\]=([A-Za-z_$][\w$]*),\4\}/u;
     const dynamicBuilderExtraMatch = currentSource.match(dynamicBuilderExtraRegex);
     if (dynamicBuilderExtraMatch != null) {
-      const [, loopBlock, , , enablementVar] = dynamicBuilderExtraMatch;
+      const [, loopBlock, , , enablementVar, featureKeyVar] = dynamicBuilderExtraMatch;
+      const featureKeyDeclaration = new RegExp(
+        `${escapeRegExp(featureKeyVar)}=\`remote_plugin\``,
+        "u",
+      );
+      if (featureKeyDeclaration.test(currentSource)) {
+        return currentSource;
+      }
       return currentSource.replace(
         dynamicBuilderExtraRegex,
         `${loopBlock}return ${enablementVar}}`,
@@ -929,71 +940,6 @@ function applyBrowserAnnotationScreenshotPatch(currentSource) {
   return patchedSource;
 }
 
-function detectCurrentRateLimitFooterSymbols(source) {
-  const accountSignalMatch = source.match(
-    /[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\?\.settings\.model\?\?null,[\s\S]{0,1200}?\{data:[A-Za-z_$][\w$]*\}=ci\(([A-Za-z_$][\w$]*)\),[\s\S]{0,1200}?[A-Za-z_$][\w$]*=Ro\([A-Za-z_$][\w$]*\),[A-Za-z_$][\w$]*=Zo\([A-Za-z_$][\w$]*\)/,
-  );
-  const durationMatch = source.match(
-    /function ([A-Za-z_$][\w$]*)\(e\)\{let [A-Za-z_$][\w$]*=\(0,Z\.c\)\(\d+\),\{minutes:[A-Za-z_$][\w$]*,variant:[A-Za-z_$][\w$]*\}=e,[\s\S]{0,700}?=Uo\(\{intl:[A-Za-z_$][\w$]*,minutes:[A-Za-z_$][\w$]*,variant:[A-Za-z_$][\w$]*\}\)/,
-  );
-  if (accountSignalMatch == null || durationMatch == null) {
-    return null;
-  }
-
-  const durationComponent = durationMatch[1];
-  const durationIndex = source.indexOf(`function ${durationComponent}(e)`);
-  const afterDuration = durationIndex === -1 ? source : source.slice(durationIndex);
-  const rateLimitMenuMatch = afterDuration.match(
-    /function ([A-Za-z_$][\w$]*)\(e\)\{let [A-Za-z_$][\w$]*=\(0,Z\.c\)\(\d+\),\{rateLimits:/,
-  );
-  if (rateLimitMenuMatch == null) {
-    return null;
-  }
-
-  return {
-    accountSignalVar: accountSignalMatch[1],
-    durationComponent,
-    insertionNeedle: `function ${rateLimitMenuMatch[1]}(e){`,
-  };
-}
-
-function detectComposerFooterConversationIdVar(source, footerNeedles) {
-  const needles = Array.isArray(footerNeedles) ? footerNeedles : [footerNeedles];
-  const footerGroupIndex = needles
-    .map((needle) => source.indexOf(needle))
-    .filter((index) => index !== -1)
-    .sort((left, right) => left - right)[0];
-  if (footerGroupIndex == null) {
-    return null;
-  }
-
-  const functionStart = source.lastIndexOf("function ", footerGroupIndex);
-  const scopePrefix = source.slice(
-    functionStart === -1 ? Math.max(0, footerGroupIndex - 5000) : functionStart,
-    footerGroupIndex,
-  );
-  const conversationPropMatch = scopePrefix.match(/conversationId:([A-Za-z_$][\w$]*)/);
-  if (conversationPropMatch != null) {
-    const conversationPropVar = conversationPropMatch[1];
-    const normalizedConversationMatches = Array.from(
-      scopePrefix.matchAll(/(?:let |,)([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\?\?([A-Za-z_$][\w$]*)(?=,|;)/g),
-    ).filter((match) => match[2] === conversationPropVar);
-    if (normalizedConversationMatches.length > 0) {
-      return normalizedConversationMatches[normalizedConversationMatches.length - 1][1];
-    }
-    return conversationPropVar;
-  }
-
-  const conversationSignalMatches = Array.from(
-    scopePrefix.matchAll(/(?:let |,)([A-Za-z_$][\w$]*)=ci\([A-Za-z_$][\w$]*\)(?=,|;)/g),
-  );
-  if (conversationSignalMatches.length > 0) {
-    return conversationSignalMatches[conversationSignalMatches.length - 1][1];
-  }
-
-  return null;
-}
-
 function detectLatestComposerFooterControls(source) {
   const controlsRegex =
     /function ([A-Za-z_$][\w$]*)\(e\)\{[\s\S]{0,9000}?conversationId:([A-Za-z_$][\w$]*)[\s\S]{0,9000}?FooterInlineControls,\{gap:`normal`,children:\[([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\]\}/;
@@ -1012,154 +958,28 @@ function detectLatestComposerFooterControls(source) {
   };
 }
 
-function detectCurrentPermissionsRateLimitFooterSymbols(source) {
-  if (!source.includes("function Sm(e){") || !source.includes("function Rm(e){")) {
-    return null;
-  }
-
-  const jsxAlias =
-    source.match(/var ([A-Za-z_$][\w$]*)=Hr\(\);/)?.[1] ??
-    source.match(/import\{[^}]*\bt as ([A-Za-z_$][\w$]*)\}from"\.\/jsx-runtime-[^"]+"/)?.[1] ??
-    null;
-  const rateLimitAliasMatch = source.match(
-    /\{data:([A-Za-z_$][\w$]*)\}=([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\),[\s\S]{0,2000}?([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\1\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\1\),[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\(\4,\{activeLimitName:\6,selectedModel:[A-Za-z_$][\w$]*\}\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\4,\{activeLimitName:\6,selectedModel:[A-Za-z_$][\w$]*\}\)/,
-  );
-  const activeModeHook = source.match(
-    /\{activeMode:[A-Za-z_$][\w$]*,modes:[A-Za-z_$][\w$]*,setSelectedMode:[A-Za-z_$][\w$]*\}=([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*\)/,
-  )?.[1] ?? null;
-  if (jsxAlias == null || rateLimitAliasMatch == null || activeModeHook == null) {
-    return null;
-  }
-
-  return {
-    jsxAlias,
-    queryHook: rateLimitAliasMatch[2],
-    queryKey: rateLimitAliasMatch[3],
-    entriesFn: rateLimitAliasMatch[5],
-    activeLimitFn: rateLimitAliasMatch[7],
-    summaryFn: rateLimitAliasMatch[9],
-    activeModeHook,
-    insertionNeedle: "function Sm(e){",
-  };
-}
-
 function applyPersistentRateLimitFooterPatch(currentSource) {
   let patchedSource = currentSource;
-  const currentSymbols = detectCurrentRateLimitFooterSymbols(currentSource);
   const latestFooterControls = detectLatestComposerFooterControls(currentSource);
-  const currentPermissionsFooterSymbols = detectCurrentPermissionsRateLimitFooterSymbols(currentSource);
-  const currentComposerStatusNeedle =
-    "function zg(e){";
-  const currentComposerFooterFunction =
-    "function codexLinuxRateLimitFooter({conversationId:e,rateLimit:t}){try{let n=Et(),{activeMode:r}=or(e),i=r?.settings.model??null,a=sa(t),o=ta(t),s=da(a,{activeLimitName:o,selectedModel:i}),c=s.filter(kg).slice(0,2);c.length===0&&(c=da(a,{activeLimitName:o,selectedModel:null}).filter(kg).slice(0,2));if(c.length===0)return null;let l=c.map(e=>`${bg(e.bucket.windowDurationMins??null,n,{withColon:!1})} ${n.formatNumber(Yi(e.bucket.usedPercent??0),{maximumFractionDigits:0})}%`).join(` / `);return(0,Q.jsx)(`span`,{className:`composer-footer__label--sm inline-flex shrink-0 items-center gap-1.5 rounded-full border border-token-border-light bg-token-main-surface-primary/80 px-2 py-1 text-xs text-token-text-secondary shadow-sm dark:border-white/10`,children:l})}catch(e){return null}}";
-  const currentComposerFooterCallNeedle =
-    "children:[ue,de,W,fe,pe,me,G,he,_e,ve,ye,xe,Se,Ce,we,Te,Ee,Oe,Ae,je,Me]";
-  const currentComposerFooterCallPatch =
-    "children:[ue,de,W,fe,pe,me,G,he,_e,ve,ye,xe,Se,Ce,we,Te,Ee,De==null?null:(0,Q.jsx)(codexLinuxRateLimitFooter,{conversationId:x,rateLimit:De}),Oe,Ae,je,Me]";
-  const currentPermissionsControlsNeedle =
-    /\(0,Q\.jsx\)\(([A-Za-z_$][\w$]*),\{conversationId:f,hostId:C,cwdOverride:w\}\),\(0,Q\.jsx\)\(([A-Za-z_$][\w$]*),\{conversationId:f,hasGoal:y,isGoalActionAvailable:b,onClearGoal:x,showDivider:!0\}\)/;
-  const shouldWarnAboutMissingFooterHelper =
-    currentSource.includes("function TF(e)") ||
-    currentSource.includes("function Cz(e)") ||
-    currentSource.includes("children:[Ut,Wt,Gt]") ||
-    currentSource.includes("(0,Q.jsx)(nz,{conversationId:f,hostId:C,cwdOverride:w})") ||
-    currentPermissionsControlsNeedle.test(currentSource) ||
-    latestFooterControls != null ||
-    (currentSource.includes(currentComposerStatusNeedle) &&
-      currentSource.includes(currentComposerFooterCallNeedle));
-  const homeFooterGroupNeedle =
-    "t[131]!==Ut||t[132]!==Wt||t[133]!==Gt?(Kt=(0,Q.jsxs)(`div`,{className:`flex min-w-0 flex-1 flex-nowrap items-center gap-1`,children:[Ut,Wt,Gt]}),t[131]=Ut,t[132]=Wt,t[133]=Gt,t[134]=Kt):Kt=t[134]";
-  const previousHomeOnlyCall =
-    "w===`home`?(0,Q.jsx)(codexLinuxRateLimitFooter,{conversationId:z}):null";
-  const previousUnguardedHomeGroupCall =
-    "children:[Ut,(0,Q.jsx)(codexLinuxRateLimitFooter,{conversationId:z}),Wt,Gt]";
-  const previousBrokenCurrentCallNeedle =
-    "(0,Q.jsx)(codexLinuxRateLimitFooter,{rateLimitEntries:";
-  const homeFooterConversationIdVar = detectComposerFooterConversationIdVar(
-    currentSource,
-    [
-      homeFooterGroupNeedle,
-      previousHomeOnlyCall,
-      previousUnguardedHomeGroupCall,
-      previousBrokenCurrentCallNeedle,
-    ],
-  );
-  const homeFooterCall = homeFooterConversationIdVar == null
-    ? null
-    : `(0,Q.jsx)(codexLinuxRateLimitFooter,{conversationId:${homeFooterConversationIdVar}})`;
-
-  const legacyFooterFunction =
-    "function codexLinuxRateLimitFooter({conversationId:e}){try{let t=(0,Z.c)(22),n=ea(),{modelSettings:r}=Bi(e),i=r.model??null,{data:a=null}=li(Fn),o=Ro(a),s=Zo(a),c=Xo(Jo(o,{activeLimitName:s,selectedModel:i})).slice(0,2);c.length===0&&(c=Xo(Jo(o,{activeLimitName:s,selectedModel:null})).slice(0,2));if(c.length===0)return null;let l;t[0]!==n?(l=(0,Q.jsx)(X,{id:`composer.linuxRateLimitFooter.tooltip`,defaultMessage:`Rate limits remaining`,description:`Tooltip for compact footer rate limit status`}),t[0]=n,t[1]=l):l=t[1];let u;if(t[2]!==c){u=c.map((e,t)=>{let n=No(e.bucket.usedPercent??0);return(0,Q.jsxs)(`span`,{className:`flex items-center gap-1 whitespace-nowrap`,children:[t>0?(0,Q.jsx)(`span`,{className:`text-token-input-placeholder-foreground`,children:`/`}):null,(0,Q.jsx)(`span`,{children:(0,Q.jsx)(V_,{minutes:e.bucket.windowDurationMins,variant:`summary`})}),(0,Q.jsx)(`span`,{className:`font-medium text-token-text-primary`,children:Do(n)})]},e.key)}),t[2]=c,t[3]=u}else u=t[3];let d;t[4]!==u?(d=(0,Q.jsx)(`span`,{className:`composer-footer__label--sm inline-flex shrink-0 items-center gap-1.5 rounded-full border border-token-border-light bg-token-main-surface-primary/80 px-2 py-1 text-xs text-token-text-secondary shadow-sm dark:border-white/10`,children:u}),t[4]=u,t[5]=d):d=t[5];let f;return t[6]!==l||t[7]!==d?(f=(0,Q.jsx)(nc,{tooltipContent:l,children:d}),t[6]=l,t[7]=d,t[8]=f):f=t[8],f}catch(e){return null}}";
-  const currentFooterFunction = currentSymbols == null
-    ? null
-    : `function codexLinuxRateLimitFooter({conversationId:e}){try{let t=(0,Z.c)(22),{activeMode:n}=Bi(e),r=n?.settings.model??null,{data:i}=ci(${currentSymbols.accountSignalVar}),a=i===void 0?null:i,o=Ro(a),s=Zo(a),c=Xo(Jo(o,{activeLimitName:s,selectedModel:r})).slice(0,2);c.length===0&&(c=Xo(Jo(o,{activeLimitName:s,selectedModel:null})).slice(0,2));if(c.length===0)return null;let l;t[0]===Symbol.for(\`react.memo_cache_sentinel\`)?(l=(0,Q.jsx)(X,{id:\`composer.linuxRateLimitFooter.tooltip\`,defaultMessage:\`Rate limits remaining\`,description:\`Tooltip for compact footer rate limit status\`}),t[0]=l):l=t[0];let u;if(t[1]!==c){u=c.map((e,t)=>{let n=No(e.bucket.usedPercent??0);return(0,Q.jsxs)(\`span\`,{className:\`flex items-center gap-1 whitespace-nowrap\`,children:[t>0?(0,Q.jsx)(\`span\`,{className:\`text-token-input-placeholder-foreground\`,children:\`/\`}):null,(0,Q.jsx)(\`span\`,{children:(0,Q.jsx)(${currentSymbols.durationComponent},{minutes:e.bucket.windowDurationMins,variant:\`summary\`})}),(0,Q.jsx)(\`span\`,{className:\`font-medium text-token-text-primary\`,children:Do(n)})]},e.key)}),t[1]=c,t[2]=u}else u=t[2];let d;t[3]!==u?(d=(0,Q.jsx)(\`span\`,{className:\`composer-footer__label--sm inline-flex shrink-0 items-center gap-1.5 rounded-full border border-token-border-light bg-token-main-surface-primary/80 px-2 py-1 text-xs text-token-text-secondary shadow-sm dark:border-white/10\`,children:u}),t[3]=u,t[4]=d):d=t[4];let f;return t[5]!==l||t[6]!==d?(f=(0,Q.jsx)(nc,{tooltipContent:l,children:d}),t[5]=l,t[6]=d,t[7]=f):f=t[7],f}catch(e){return null}}`;
   const latestFooterFunction =
     "function codexLinuxRateLimitFooter({conversationId:e}){try{let t=(0,$.c)(8),{activeMode:n}=or(e),r=n?.settings.model??null,{data:i}=St(ue),a=ma(i),o=la(i),s=da(a,{activeLimitName:o,selectedModel:r}).filter(og).slice(0,2);if(s.length===0)return null;let c=ht(),l;if(t[0]!==s||t[1]!==c){l=s.map(e=>`${Xh(e.bucket.windowDurationMins??null,c)} ${c.formatNumber(Sa(e.bucket.usedPercent??0),{maximumFractionDigits:0})}%`).join(` / `),t[0]=s,t[1]=c,t[2]=l}else l=t[2];let u;return t[3]!==l?(u=(0,Q.jsx)(`span`,{className:`composer-footer__label--sm inline-flex shrink-0 items-center gap-1.5 rounded-full border border-token-border-light bg-token-main-surface-primary/80 px-2 py-1 text-xs text-token-text-secondary shadow-sm dark:border-white/10`,children:l}),t[3]=l,t[4]=u):u=t[4],u}catch(e){return null}}";
-  const currentPermissionsFooterFunction = currentPermissionsFooterSymbols == null
-    ? null
-    : `function codexLinuxRateLimitFooter({conversationId:e}){try{let t=${currentPermissionsFooterSymbols.activeModeHook}(e)?.activeMode?.settings.model??null,{data:n}=${currentPermissionsFooterSymbols.queryHook}(${currentPermissionsFooterSymbols.queryKey}),r=${currentPermissionsFooterSymbols.entriesFn}(n),i=${currentPermissionsFooterSymbols.activeLimitFn}(n),a=${currentPermissionsFooterSymbols.summaryFn}(r,{activeLimitName:i,selectedModel:t});if(a==null)return null;let o=[];if(a.windowMinutes!=null){let e=a.windowMinutes;o.push(e>=1440?\`\${Math.ceil(e/1440)}d\`:e>=60?\`\${Math.ceil(e/60)}h\`:\`\${Math.ceil(e)}m\`)}a.remainingPercent!=null&&o.push(\`\${Math.round(a.remainingPercent)}%\`);if(o.length===0)return null;return(0,${currentPermissionsFooterSymbols.jsxAlias}.jsx)(\`span\`,{className:\`composer-footer__label--sm inline-flex shrink-0 items-center gap-1.5 rounded-full border border-token-border-light bg-token-main-surface-primary/80 px-2 py-1 text-xs text-token-text-secondary shadow-sm dark:border-white/10\`,children:o.join(\` \`)})}catch(e){return null}}`;
 
   if (!patchedSource.includes("function codexLinuxRateLimitFooter(")) {
-    const legacyInsertionNeedle = "function TF(e){";
     if (latestFooterControls != null) {
+      recordStrategy("rate-limit-footer", "upstream-latest");
       patchedSource = patchedSource.replace(
         latestFooterControls.insertionNeedle,
         `${latestFooterFunction}${latestFooterControls.insertionNeedle}`,
       );
-    } else if (currentSymbols != null && currentFooterFunction != null) {
-      patchedSource = patchedSource.replace(
-        currentSymbols.insertionNeedle,
-        `${currentFooterFunction}${currentSymbols.insertionNeedle}`,
-      );
-    } else if (currentPermissionsFooterSymbols != null && currentPermissionsFooterFunction != null) {
-      patchedSource = patchedSource.replace(
-        currentPermissionsFooterSymbols.insertionNeedle,
-        `${currentPermissionsFooterFunction}${currentPermissionsFooterSymbols.insertionNeedle}`,
-      );
-    } else if (patchedSource.includes(currentComposerStatusNeedle)) {
-      patchedSource = patchedSource.replace(
-        currentComposerStatusNeedle,
-        `${currentComposerFooterFunction}${currentComposerStatusNeedle}`,
-      );
-    } else if (patchedSource.includes(legacyInsertionNeedle)) {
-      patchedSource = patchedSource.replace(
-        legacyInsertionNeedle,
-        `${legacyFooterFunction}${legacyInsertionNeedle}`,
-      );
-    }
-  } else if (currentSymbols != null && currentFooterFunction != null) {
-    const functionStart = patchedSource.indexOf("function codexLinuxRateLimitFooter(");
-    const functionEnd = patchedSource.indexOf(currentSymbols.insertionNeedle, functionStart);
-    if (functionEnd !== -1) {
-      const existingFooterFunction = patchedSource.slice(functionStart, functionEnd);
-      if (existingFooterFunction !== currentFooterFunction) {
-        patchedSource =
-          patchedSource.slice(0, functionStart) +
-          currentFooterFunction +
-          patchedSource.slice(functionEnd);
-      }
-    }
-  } else {
-    const legacyInsertionNeedle = "function TF(e){";
-    const functionStart = patchedSource.indexOf("function codexLinuxRateLimitFooter(");
-    const functionEnd = patchedSource.indexOf(legacyInsertionNeedle, functionStart);
-    if (functionStart !== -1 && functionEnd !== -1) {
-      const existingFooterFunction = patchedSource.slice(functionStart, functionEnd);
-      if (existingFooterFunction !== legacyFooterFunction) {
-        patchedSource =
-          patchedSource.slice(0, functionStart) +
-          legacyFooterFunction +
-          patchedSource.slice(functionEnd);
-      }
-    }
-  }
-
-  const hasFooterFunction = patchedSource.includes("function codexLinuxRateLimitFooter(");
-  if (!hasFooterFunction) {
-    if (shouldWarnAboutMissingFooterHelper) {
+    } else if (currentSource.includes("FooterInlineControls")) {
+      // Composer-shaped bundle, but the footer controls drifted from the
+      // supported upstream shape.
+      recordStrategy("rate-limit-footer", "none");
       console.warn("WARN: Could not insert persistent rate limit footer helper — skipping composer footer limit patch");
+      return currentSource;
+    } else {
+      return currentSource;
     }
-    return currentSource;
   }
 
   if (
@@ -1170,85 +990,6 @@ function applyPersistentRateLimitFooterPatch(currentSource) {
     patchedSource = patchedSource.replace(
       latestFooterControls.footerControlsNeedle,
       latestFooterControls.footerControlsPatch,
-    );
-  }
-
-  const cacheNeedle = "function TF(e){let t=(0,Z.c)(148),";
-  const cachePatch = "function TF(e){let t=(0,Z.c)(149),";
-  if (patchedSource.includes(cacheNeedle)) {
-    patchedSource = patchedSource.replace(cacheNeedle, cachePatch);
-  }
-
-  // The upstream Kt cache only tracks Ut/Wt/Gt. Recompute this group once the
-  // injected child depends on conversationId, otherwise the footer can retain
-  // a stale conversationId while the other footer children stay stable.
-  const homeFooterGroupPatch = homeFooterCall == null
-    ? null
-    : `Kt=(0,Q.jsxs)(\`div\`,{className:\`flex min-w-0 flex-1 flex-nowrap items-center gap-1\`,children:[Ut,${homeFooterCall},Wt,Gt]})`;
-  if (homeFooterGroupPatch != null && patchedSource.includes(homeFooterGroupNeedle)) {
-    patchedSource = patchedSource.replace(homeFooterGroupNeedle, homeFooterGroupPatch);
-  }
-
-  if (patchedSource.includes(previousHomeOnlyCall)) {
-    patchedSource = patchedSource.replace(
-      previousHomeOnlyCall,
-      homeFooterCall ?? "null",
-    );
-  }
-
-  if (patchedSource.includes(previousUnguardedHomeGroupCall)) {
-    patchedSource = patchedSource.replace(
-      previousUnguardedHomeGroupCall,
-      `children:[Ut,${homeFooterCall ?? "null"},Wt,Gt]`,
-    );
-  }
-
-  const previousBrokenCurrentCall =
-    /\(0,Q\.jsx\)\(codexLinuxRateLimitFooter,\{rateLimitEntries:[A-Za-z_$][\w$]*,activeLimitName:[A-Za-z_$][\w$]*,selectedModel:[A-Za-z_$][\w$]*\}\)/g;
-  if (
-    currentFooterFunction != null &&
-    previousBrokenCurrentCall.test(patchedSource) &&
-    currentSymbols != null
-  ) {
-    patchedSource = patchedSource.replace(
-      previousBrokenCurrentCall,
-      homeFooterCall ?? "null",
-    );
-  }
-  if (patchedSource.includes(previousHomeOnlyCall)) {
-    patchedSource = patchedSource.replace(
-      previousHomeOnlyCall,
-      homeFooterCall ?? "null",
-    );
-  }
-
-  const permissionsControlsNeedle =
-    "(0,Q.jsx)(nz,{conversationId:f,hostId:C,cwdOverride:w}),(0,Q.jsx)(vz,{conversationId:f,hasGoal:y,isGoalActionAvailable:b,onClearGoal:x,showDivider:!0})";
-  const permissionsControlsPatch =
-    "(0,Q.jsx)(nz,{conversationId:f,hostId:C,cwdOverride:w}),f==null?null:(0,Q.jsx)(codexLinuxRateLimitFooter,{conversationId:f}),(0,Q.jsx)(vz,{conversationId:f,hasGoal:y,isGoalActionAvailable:b,onClearGoal:x,showDivider:!0})";
-  if (patchedSource.includes(permissionsControlsNeedle)) {
-    patchedSource = patchedSource.replace(permissionsControlsNeedle, permissionsControlsPatch);
-  }
-  if (currentPermissionsControlsNeedle.test(patchedSource)) {
-    patchedSource = patchedSource.replace(
-      currentPermissionsControlsNeedle,
-      "(0,Q.jsx)($1,{conversationId:f,hostId:C,cwdOverride:w}),f==null?null:(0,Q.jsx)(codexLinuxRateLimitFooter,{conversationId:f}),(0,Q.jsx)($2,{conversationId:f,hasGoal:y,isGoalActionAvailable:b,onClearGoal:x,showDivider:!0})",
-    );
-  }
-
-  if (
-    patchedSource === currentSource &&
-    !currentSource.includes("function codexLinuxRateLimitFooter(") &&
-    shouldWarnAboutMissingFooterHelper
-  ) {
-    console.warn("WARN: Could not find persistent rate limit footer needles — skipping composer footer limit patch");
-  }
-  if (patchedSource.includes(currentComposerFooterCallPatch)) {
-    // Already patched.
-  } else if (patchedSource.includes(currentComposerFooterCallNeedle)) {
-    patchedSource = patchedSource.replace(
-      currentComposerFooterCallNeedle,
-      currentComposerFooterCallPatch,
     );
   }
 
