@@ -865,12 +865,22 @@ test("assistant render patch preserves the current JSX runtime alias", () => {
   assert.match(patched, /globalThis\.codexLinuxReadAloudClick\?\.\(n,p,o,e\.currentTarget\)/);
 });
 
-test("assistant runtime descriptor targets split local conversation turn bundles", () => {
+test("assistant render patch covers the current shared assistant message call", () => {
+  const source = "return (0,DX.jsx)(Jft,{item:n,alwaysShowActions:V,assistantCopyText:_,turnId:v,processTargets:b,hookStats:D,threadDetailLevel:u,completedThreadGoal:O,after:C,electronAfter:w,conversationId:l,cwd:p,hostId:m,reportEntityType:h,markdownMediaCacheKey:e,projectlessOutputDirectory:q,forceCodeBlockWordWrap:ie,hasArtifacts:J,onAddSelectedTextToChat:r,onFileLinkOpen:E,onFork:F,renderCodeBlocksAsWritingBlocks:ie,showActionRow:H,showTimestampWithoutActions:U,showProcessBadges:i})";
+  const patched = twice(applyAssistantRenderPatch, source);
+
+  assert.match(patched, /DX\.Fragment/);
+  assert.match(patched, /\(0,DX\.jsx\)\("button"/);
+  assert.match(patched, /globalThis\.codexLinuxReadAloudClick\?\.\(n,_,l,e\.currentTarget\)/);
+});
+
+test("assistant runtime descriptor targets current shared assistant bundles", () => {
   const descriptor = featurePatches.find((patch) => patch.id === "assistant-runtime");
   assert.ok(descriptor);
   assert.equal(descriptor.pattern.test("index-current.js"), true);
   assert.equal(descriptor.pattern.test("local-conversation-thread-current.js"), true);
   assert.equal(descriptor.pattern.test("local-conversation-turn-current.js"), true);
+  assert.equal(descriptor.pattern.test("app-initial~app-main~onboarding-page-current.js"), true);
 });
 
 test("settings patch does not add the legacy normal settings toggle", () => {
@@ -1253,6 +1263,39 @@ test("settings asset patch leaves current keybinds settings file alone", () => {
     const patched = fs.readFileSync(asset, "utf8");
     assert.doesNotMatch(patched, /readAloud:"codex-linux-read-aloud-enabled"/);
     assert.doesNotMatch(patched, /label:"Read aloud responses"/);
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 0 });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("settings asset patch adds read aloud controls to generated Linux desktop settings", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-settings-"));
+  try {
+    const assets = path.join(root, "webview", "assets");
+    fs.mkdirSync(assets, { recursive: true });
+    const asset = path.join(assets, "linux-desktop-settings-linux.js");
+    fs.writeFileSync(
+      asset,
+      'var React={Fragment:{}},$={jsx(){},jsxs(){}},KEYS={promptWindow:"codex-linux-prompt-window-enabled",systemTray:"codex-linux-system-tray-enabled",warmStart:"codex-linux-warm-start-enabled",autoUpdateOnExit:"codex-linux-auto-update-on-exit"};function useLinuxSetting(){}function SettingsRow(){}function SettingsSection(){}function SettingsGroup(){}function SettingsPage(){}function Toggle(){}function LinuxToggle(){}function LinuxBuildInfoPanel(){}function LinuxDesktopSettings(){return $.jsx(SettingsPage,{title:"Linux desktop",subtitle:"Launcher, tray, prompt window, and update behavior.",children:$.jsxs("div",{className:"flex flex-col gap-6",children:[$.jsxs(SettingsSection,{className:"gap-2",children:[$.jsx(SettingsSection.Header,{title:"Updates"}),$.jsx(SettingsSection.Content,{children:$.jsx(SettingsGroup,{children:$.jsx(LinuxToggle,{settingKey:KEYS.autoUpdateOnExit,label:"Install updates when you close Codex",description:"When on, a ready update waits for Codex to close and then installs. When off, updates wait until you click Update."})})})]}),$.jsxs(SettingsSection,{className:"gap-2",children:[$.jsx(SettingsSection.Header,{title:"Build"}),$.jsx(SettingsSection.Content,{children:$.jsx(SettingsGroup,{children:$.jsx(LinuxBuildInfoPanel,{})})})]})]})})}export{LinuxDesktopSettings,LinuxDesktopSettings as default};',
+    );
+
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 1 });
+    const patched = fs.readFileSync(asset, "utf8");
+    assert.match(patched, /readAloud:"codex-linux-read-aloud-enabled"/);
+    assert.match(patched, /readAloudSpeed:"codex-linux-read-aloud-kokoro-speed"/);
+    assert.match(patched, /function LinuxReadAloudSettings\(\)/);
+    assert.match(patched, /title:"Read Aloud"/);
+    assert.match(patched, /label:"Read aloud responses"/);
+    assert.match(patched, /children:"Choose folder"/);
+    assert.match(patched, /children:"Download voice"/);
+    assert.match(patched, /label:"Speech pace"/);
+    assert.match(
+      patched,
+      /\$\.jsx\(LinuxReadAloudSettings,\{\}\),\$\.jsxs\(SettingsSection,\{className:"gap-2",children:\[\$\.jsx\(SettingsSection\.Header,\{title:"Build"/,
+    );
+    assert.doesNotMatch(patched, /LinuxSettingsSection/);
+    assert.doesNotMatch(patched, /LinuxSettingsRow/);
     assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 0 });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

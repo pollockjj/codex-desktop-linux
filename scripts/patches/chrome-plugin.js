@@ -109,32 +109,46 @@ function applyLinuxChromePluginAutoInstallPatch(currentSource) {
 }
 
 function applyLinuxChromeNativeHostRuntimePatch(currentSource) {
-  if (currentSource.includes("codexLinuxChromeNativeHostRuntimeFile")) {
-    return currentSource;
+  let helper = "";
+  if (!currentSource.includes("codexLinuxChromeNativeHostRuntimeFile")) {
+    const fsVar = requireName(currentSource, "node:fs");
+    const pathVar = requireName(currentSource, "node:path");
+    if (fsVar == null || pathVar == null) {
+      console.warn(
+        "WARN: Could not find fs/path aliases — skipping Linux Chrome native host runtime patch",
+      );
+      return currentSource;
+    }
+
+    helper =
+      `function codexLinuxChromeNativeHostRuntimeFile(e,t){if(process.platform!==\`linux\`||e==null)return null;for(let n of t){let t=(0,${pathVar}.join)(e,...n);try{if((0,${fsVar}.statSync)(t).isFile())return t}catch{}}return null}function codexLinuxChromeNativeHostRuntimeEnv(e){if(process.platform!==\`linux\`)return null;let t=process.env[e];if(t==null||t.length===0)return null;try{return(0,${fsVar}.statSync)(t).isFile()?t:null}catch{return null}}function codexLinuxChromeNativeHostRuntimePath(e){if(process.platform!==\`linux\`)return null;for(let t of(process.env.PATH??\`\`).split(\`:\`)){if(t.length===0)continue;let n=(0,${pathVar}.join)(t,e);try{if((0,${fsVar}.statSync)(n).isFile())return n}catch{}}return null}function codexLinuxChromeNativeHostRuntimeEntry(e,t){return e==null?null:{path:e,source:t}}`;
   }
 
-  const fsVar = requireName(currentSource, "node:fs");
-  const pathVar = requireName(currentSource, "node:path");
-  if (fsVar == null || pathVar == null) {
-    console.warn(
-      "WARN: Could not find fs/path aliases — skipping Linux Chrome native host runtime patch",
-    );
-    return currentSource;
-  }
+  let patchedSource = currentSource;
+  let changed = false;
+  const takePatch = (nextSource) => {
+    if (nextSource == null || nextSource === patchedSource) {
+      return false;
+    }
+    patchedSource = nextSource;
+    helper = "";
+    changed = true;
+    return true;
+  };
 
-  const helper =
-    `function codexLinuxChromeNativeHostRuntimeFile(e,t){if(process.platform!==\`linux\`||e==null)return null;for(let n of t){let t=(0,${pathVar}.join)(e,...n);try{if((0,${fsVar}.statSync)(t).isFile())return t}catch{}}return null}function codexLinuxChromeNativeHostRuntimeEnv(e){if(process.platform!==\`linux\`)return null;let t=process.env[e];if(t==null||t.length===0)return null;try{return(0,${fsVar}.statSync)(t).isFile()?t:null}catch{return null}}function codexLinuxChromeNativeHostRuntimePath(e){if(process.platform!==\`linux\`)return null;for(let t of(process.env.PATH??\`\`).split(\`:\`)){if(t.length===0)continue;let n=(0,${pathVar}.join)(t,e);try{if((0,${fsVar}.statSync)(n).isFile())return n}catch{}}return null}function codexLinuxChromeNativeHostRuntimeEntry(e,t){return e==null?null:{path:e,source:t}}`;
-  const modernRuntimeResolverPatch = applyModernChromeNativeHostRuntimePatch(
-    currentSource,
-    helper,
-  );
-  if (modernRuntimeResolverPatch != null) {
-    return modernRuntimeResolverPatch;
+  takePatch(applyModernChromeNativeHostRuntimePatch(patchedSource, helper));
+  takePatch(applyChromePluginCodexAppServerRuntimePatch(patchedSource, helper));
+  takePatch(applyChromePluginAppServerRuntimePatch(patchedSource, helper));
+  if (changed) {
+    return patchedSource;
   }
 
   const missingRuntimeMessage =
     "Missing bundled Electron runtime required to sync Chrome native host resources";
-  if (!currentSource.includes(missingRuntimeMessage)) {
+  if (
+    !currentSource.includes(missingRuntimeMessage) &&
+    !currentSource.includes("Missing bundled Electron Codex runtime required to sync Chrome plugin app server")
+  ) {
     console.warn(
       "WARN: Could not find Chrome native host runtime resolver — skipping Linux runtime path patch",
     );
@@ -197,6 +211,31 @@ function applyLinuxChromeNativeHostRuntimePatch(currentSource) {
     `${helper}function ${resolverName}(${configVar}){let ${codexVar}=${codexResourceFn}(${configVar}.resourcesPath)??codexLinuxChromeNativeHostRuntimeEnv(\`CODEX_CLI_PATH\`)??codexLinuxChromeNativeHostRuntimePath(\`codex\`)??${devRuntimeFn}(${configVar}.devRuntimeRepoRoot,[\`extension\`,\`bin\`,process.platform===\`win32\`?\`codex.exe\`:\`codex\`]),${nodeVar}=${nodeResourceFn}(${configVar}.resourcesPath)??codexLinuxChromeNativeHostRuntimeEnv(\`CODEX_BROWSER_USE_NODE_PATH\`)??codexLinuxChromeNativeHostRuntimeEnv(\`NODE_REPL_NODE_PATH\`)??codexLinuxChromeNativeHostRuntimeFile(${configVar}.resourcesPath,[[\`node-runtime\`,\`bin\`,process.platform===\`win32\`?\`node.exe\`:\`node\`]])??${devRuntimeFn}(${configVar}.devRuntimeRepoRoot,[\`electron\`,\`bin\`,process.platform===\`win32\`?\`node.exe\`:\`node\`]),${nodeReplVar}=${nodeReplResourceFn}(${configVar}.resourcesPath)??codexLinuxChromeNativeHostRuntimeEnv(\`CODEX_NODE_REPL_PATH\`)??codexLinuxChromeNativeHostRuntimeFile(${configVar}.resourcesPath,[[process.platform===\`win32\`?\`node_repl.exe\`:\`node_repl\`]])??${devRuntimeFn}(${configVar}.devRuntimeRepoRoot,[\`electron\`,\`bin\`,process.platform===\`win32\`?\`node_repl.exe\`:\`node_repl\`]),`;
 
   return currentSource.replace(originalPrefix, replacement);
+}
+
+function applyChromePluginCodexAppServerRuntimePatch(currentSource, helper) {
+  if (!currentSource.includes("Missing bundled Electron Codex runtime required to sync Chrome plugin app server")) {
+    return null;
+  }
+
+  const appServerCodexRuntimeRegex =
+    /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\2\);if\(\3==null\)throw Error\(`Missing bundled Electron Codex runtime required to sync Chrome plugin app server for \$\{\2\.nativeHostName\} \(resourcesPath: \$\{\2\.resourcesPath\?\?`<none>`\}\)\.`\);return ([A-Za-z_$][\w$]*)\(\{codexCliPath:\3,codexHome:\2\.codexHome,nativeHostName:\2\.nativeHostName\}\)\}/;
+  const match = currentSource.match(appServerCodexRuntimeRegex);
+  if (match == null) {
+    return null;
+  }
+
+  const [
+    original,
+    resolverFn,
+    configVar,
+    codexVar,
+    bundledCodexResolverFn,
+    syncFn,
+  ] = match;
+  const replacement =
+    `${helper}async function ${resolverFn}(${configVar}){let ${codexVar}=${bundledCodexResolverFn}(${configVar})??codexLinuxChromeNativeHostRuntimeEnv(\`CODEX_CLI_PATH\`)??codexLinuxChromeNativeHostRuntimePath(\`codex\`);if(${codexVar}==null)throw Error(\`Missing bundled Electron Codex runtime required to sync Chrome plugin app server for \${${configVar}.nativeHostName} (resourcesPath: \${${configVar}.resourcesPath??\`<none>\`}).\`);return ${syncFn}({codexCliPath:${codexVar},codexHome:${configVar}.codexHome,nativeHostName:${configVar}.nativeHostName})}`;
+  return currentSource.replace(original, replacement);
 }
 
 function applyChromePluginAppServerRuntimePatch(currentSource, helper) {

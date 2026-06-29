@@ -142,6 +142,42 @@ make_stub_bin_dir() {
     mkdir -p "$bin_dir"
 }
 
+test_extract_webview_replaces_linux_icon_assets() {
+    info "Checking webview extraction applies the Linux icon asset"
+    local workspace="$TMP_DIR/webview-icon"
+    local install_dir="$workspace/install"
+    local work_dir="$workspace/work"
+    local icon_source="$workspace/codex-linux.png"
+    local assets_dir="$install_dir/content/webview/assets"
+    local output_log="$workspace/output.log"
+
+    mkdir -p "$work_dir/app-extracted/webview/assets" "$install_dir"
+    printf '%s\n' 'linux-icon' > "$icon_source"
+    printf '%s\n' 'upstream-main' > "$work_dir/app-extracted/webview/assets/app-main.png"
+    printf '%s\n' 'upstream-alt' > "$work_dir/app-extracted/webview/assets/app-alt.png"
+    printf '%s\n' '<style>--startup-background: transparent</style>' > "$work_dir/app-extracted/webview/index.html"
+
+    (
+        SCRIPT_DIR="$REPO_DIR"
+        INSTALL_DIR="$install_dir"
+        WORK_DIR="$work_dir"
+        ICON_SOURCE="$icon_source"
+        CODEX_LINUX_ICON_SOURCE="$icon_source"
+        # shellcheck disable=SC1091
+        source "$REPO_DIR/scripts/lib/webview-install.sh"
+        extract_webview "$workspace/Codex.app"
+    ) >"$output_log" 2>&1
+
+    assert_file_exists "$assets_dir/app-main.png"
+    assert_file_exists "$assets_dir/app-alt.png"
+    cmp -s "$icon_source" "$assets_dir/app-main.png" \
+        || fail "Expected extracted app-main.png to be replaced with the Linux icon"
+    cmp -s "$icon_source" "$assets_dir/app-alt.png" \
+        || fail "Expected extracted app-alt.png to be replaced with the Linux icon"
+    assert_contains "$install_dir/content/webview/index.html" "--startup-background: #1e1e1e"
+    assert_contains "$output_log" "Linux app icon applied to 2 webview asset(s)"
+}
+
 test_common_helper_sourcing() {
     info "Checking shared packaging helpers"
     local probe_file="$TMP_DIR/probe.txt"
@@ -454,6 +490,19 @@ test_update_builder_preserves_enabled_linux_features_config() {
     "example-feature",
     "local-tool"
   ],
+  "settings": {
+    "example-feature": {
+      "tweaks": {
+        "enabled": true
+      }
+    },
+    "disabled-feature": {
+      "should": "not be packaged"
+    },
+    "local-tool": {
+      "mode": "local"
+    }
+  },
   "localComment": "should not be packaged"
 }
 JSON
@@ -476,13 +525,29 @@ JSON
     assert_file_exists "$staged_local_manifest"
     assert_contains "$staged_config" "example-feature"
     assert_contains "$staged_config" "local-tool"
+    assert_contains "$staged_config" "tweaks"
+    assert_contains "$staged_config" "mode"
     assert_not_contains "$staged_config" "localComment"
+    assert_not_contains "$staged_config" "disabled-feature"
 
     node - "$staged_config" <<'NODE' || fail "Expected staged Linux features config to be sanitized"
 const fs = require("node:fs");
 const configPath = process.argv[2];
 const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-if (JSON.stringify(config) !== JSON.stringify({ enabled: ["example-feature", "local-tool"] })) {
+const expected = {
+  enabled: ["example-feature", "local-tool"],
+  settings: {
+    "example-feature": {
+      tweaks: {
+        enabled: true,
+      },
+    },
+    "local-tool": {
+      mode: "local",
+    },
+  },
+};
+if (JSON.stringify(config) !== JSON.stringify(expected)) {
   process.exit(1);
 }
 NODE
@@ -1168,6 +1233,21 @@ test_make_install_reports_missing_native_packages() {
     done
 }
 
+test_make_run_app_reports_missing_launcher() {
+    info "Checking make run-app missing-launcher diagnostics"
+    local workspace="$TMP_DIR/make-run-app-missing"
+    local output_log="$workspace/run-app.log"
+
+    mkdir -p "$workspace"
+
+    if make -f "$REPO_DIR/Makefile" -C "$workspace" run-app >"$output_log" 2>&1; then
+        fail "make run-app should fail when codex-app/start.sh is missing"
+    fi
+
+    assert_contains "$output_log" "Missing launcher: $workspace/codex-app/start.sh. Run make build-app first."
+    assert_not_contains "$output_log" "No such file or directory"
+}
+
 test_make_build_app_uses_installer_download_flow_by_default() {
     info "Checking make build-app default DMG behavior"
     local workspace="$TMP_DIR/make-build-app"
@@ -1577,6 +1657,7 @@ test_fresh_install_removes_cached_dmg_metadata() {
     local source_dir="$workspace/source"
 
     mkdir -p "$source_dir"
+    printf '%s' "cached" >"$source_dir/Codex.dmg"
     printf '%s' "metadata" >"$source_dir/Codex.dmg.metadata"
 
     TEST_SOURCE_DIR="$source_dir" REPO_DIR="$REPO_DIR" bash <<'SCRIPT'
@@ -1595,6 +1676,94 @@ SCRIPT
 
     assert_file_not_exists "$source_dir/Codex.dmg"
     assert_file_not_exists "$source_dir/Codex.dmg.metadata"
+}
+
+test_fresh_reuse_dmg_uses_cache_when_metadata_matches() {
+    info "Checking --fresh --reuse-dmg reuses cached DMG when metadata matches"
+    local workspace="$TMP_DIR/fresh-reuse-dmg-metadata"
+    local bin_dir="$workspace/bin"
+    local source_dir="$workspace/source"
+    local output_log="$workspace/output.log"
+    local url="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
+    local url_sha256
+
+    url_sha256="$(printf '%s' "$url" | sha256sum | awk '{print $1}')"
+
+    mkdir -p "$bin_dir" "$source_dir"
+    printf '%s' "cached" >"$source_dir/Codex.dmg"
+    cat >"$source_dir/Codex.dmg.metadata" <<EOF
+url_sha256=$url_sha256
+etag=same-etag
+last_modified=Thu, 04 Jun 2026 00:00:00 GMT
+content_length=6
+EOF
+
+    cat >"$bin_dir/curl" <<'SCRIPT'
+#!/usr/bin/env bash
+set -eu
+
+is_head=0
+for arg in "$@"; do
+    if [ "$arg" = "-fsSLI" ]; then
+        is_head=1
+    fi
+done
+
+if [ "$is_head" -eq 1 ]; then
+    printf '%s\n' "HEAD" >> "$TEST_CURL_LOG"
+    printf 'HTTP/2 200\r\n'
+    printf 'ETag: same-etag\r\n'
+    printf 'Last-Modified: Thu, 04 Jun 2026 00:00:00 GMT\r\n'
+    printf 'Content-Length: 6\r\n'
+    printf '\r\n'
+    exit 0
+fi
+
+printf '%s\n' "GET" >> "$TEST_CURL_LOG"
+out=""
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+        shift
+        out="$1"
+    fi
+    shift || true
+done
+
+[ -n "$out" ] || exit 2
+printf '%s' "downloaded" >"$out"
+SCRIPT
+    chmod +x "$bin_dir/curl"
+    : >"$source_dir/curl.log"
+
+    PATH="$bin_dir:$PATH" \
+    TEST_CURL_LOG="$source_dir/curl.log" \
+    TEST_SOURCE_DIR="$source_dir" \
+    REPO_DIR="$REPO_DIR" \
+        bash <<'SCRIPT' >"$output_log" 2>&1
+set -Eeuo pipefail
+
+SCRIPT_DIR="$TEST_SOURCE_DIR"
+WORK_DIR="$(mktemp -d)"
+INSTALL_DIR="$TEST_SOURCE_DIR/codex-app"
+# shellcheck disable=SC1091
+source "$REPO_DIR/scripts/lib/install-helpers.sh"
+# shellcheck disable=SC1091
+source "$REPO_DIR/scripts/lib/dmg.sh"
+
+FRESH_INSTALL=1
+REUSE_CACHED_DMG=1
+prepare_install
+
+dmg_path="$(get_dmg)"
+[ "$dmg_path" = "$TEST_SOURCE_DIR/Codex.dmg" ]
+SCRIPT
+
+    assert_file_exists "$source_dir/Codex.dmg"
+    assert_file_exists "$source_dir/Codex.dmg.metadata"
+    [ "$(cat "$source_dir/Codex.dmg")" = "cached" ] || fail "Expected matching metadata to keep cached DMG"
+    assert_contains "$source_dir/curl.log" "HEAD"
+    assert_not_contains "$source_dir/curl.log" "GET"
+    assert_contains "$output_log" "Using cached DMG"
 }
 
 test_rebuild_candidate_uses_validated_default_dmg() {
@@ -1653,7 +1822,7 @@ test_native_shortcut_targets_compose_existing_flows() {
     local setup_log="$TMP_DIR/make-setup-native.log"
 
     make -n -C "$REPO_DIR" install-native >"$install_log"
-    assert_contains "$install_log" './install.sh --fresh'
+    assert_contains "$install_log" './install.sh --fresh --reuse-dmg'
     assert_contains "$install_log" 'Building native package'
     assert_contains "$install_log" 'Installing latest native package'
 
@@ -1672,7 +1841,7 @@ test_native_shortcut_targets_compose_existing_flows() {
 }
 
 test_fedora_dependency_bootstrap_installs_rpmbuild() {
-    info "Checking Fedora dependency bootstrap includes rpmbuild"
+    info "Checking Fedora dependency bootstrap includes rpmbuild and C++ build tools"
     local install_deps="$REPO_DIR/scripts/install-deps.sh"
     local helper="$REPO_DIR/scripts/lib/install-helpers.sh"
     local readme="$REPO_DIR/README.md"
@@ -1681,13 +1850,17 @@ test_fedora_dependency_bootstrap_installs_rpmbuild() {
         || fail "install_dnf5 must install rpm-build for rpmbuild"
     awk '/^install_dnf\(\) \{/,/^}/' "$install_deps" | grep -q -- "rpm-build" \
         || fail "install_dnf must install rpm-build for rpmbuild"
+    awk '/^install_dnf5\(\) \{/,/^}/' "$install_deps" | grep -q -- "gcc-c++" \
+        || fail "install_dnf5 must install gcc-c++ for g++"
+    awk '/^install_dnf\(\) \{/,/^}/' "$install_deps" | grep -q -- "gcc-c++" \
+        || fail "install_dnf must install gcc-c++ for g++"
 
-    assert_contains "$install_deps" "sudo dnf install python3 7zip curl unzip rpm-build @development-tools"
-    assert_contains "$install_deps" "sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build"
-    assert_contains "$helper" "sudo dnf install python3 7zip curl unzip rpm-build @development-tools"
-    assert_contains "$helper" "sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build"
-    assert_contains "$readme" "sudo dnf install python3 7zip curl unzip rpm-build @development-tools"
-    assert_contains "$readme" "sudo dnf install python3 p7zip p7zip-plugins curl unzip rpm-build"
+    assert_contains "$install_deps" "sudo dnf install python3 7zip curl unzip rpm-build make gcc-c++ @development-tools"
+    assert_contains "$install_deps" "sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build make gcc-c++"
+    assert_contains "$helper" "sudo dnf install python3 7zip curl unzip rpm-build make gcc-c++ @development-tools"
+    assert_contains "$helper" "sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build make gcc-c++"
+    assert_contains "$readme" "sudo dnf install python3 7zip curl unzip rpm-build make gcc-c++ @development-tools"
+    assert_contains "$readme" "sudo dnf install python3 p7zip p7zip-plugins curl unzip rpm-build make gcc-c++"
 }
 
 test_setup_native_wizard_noninteractive_feature_writer() {
@@ -1699,7 +1872,22 @@ test_setup_native_wizard_noninteractive_feature_writer() {
 
     make_wizard_feature_root "$features_root"
     cat > "$config" <<'JSON'
-{"enabled":["conversation-mode"]}
+{
+  "enabled": [
+    "conversation-mode"
+  ],
+  "settings": {
+    "ui-tweaks": {
+      "tweaks": {
+        "sidebar": {
+          "projectName": {
+            "style": "font-weight: 700 !important; padding-top: 0.25rem;"
+          }
+        }
+      }
+    }
+  }
+}
 JSON
 
     CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
@@ -1711,6 +1899,13 @@ JSON
         bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log"
 
     assert_json_enabled_equals "$config" '["remote-mobile-control","read-aloud"]'
+    node - "$config" <<'NODE' || fail "Expected setup-native wizard to preserve Linux feature settings"
+const fs = require("node:fs");
+const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (config.settings?.["ui-tweaks"]?.tweaks?.sidebar?.projectName?.style !== "font-weight: 700 !important; padding-top: 0.25rem;") {
+  process.exit(1);
+}
+NODE
     assert_contains "$output_log" "remote-mobile-control"
     assert_contains "$output_log" "read-aloud"
     assert_contains "$output_log" "Manual-update native package mode selected"
@@ -3570,7 +3765,7 @@ EOF
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/bin/codex-desktop" 'exec "${APP_DIR}/start.sh" --wayland "$@"'
     assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "--force-x11"
     assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "user-local.env"
-    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh" "assets/codex.png"
+    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh" "assets/codex-linux.png"
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh" "CODEX_USER_LOCAL_RECORD_DMG_FINGERPRINT"
     assert_contains "$REPO_DIR/contrib/user-local-install/README.md" "--force-x11"
 
@@ -3642,17 +3837,23 @@ test_side_by_side_launcher_identity() {
     local bin_dir="$workspace/bin"
     local help_log="$workspace/help.log"
     local symlink_help_log="$workspace/symlink-help.log"
+    local linux_icon_source="$workspace/codex-linux.png"
 
     mkdir -p "$app_dir" "$bin_dir"
+    printf '%s\n' 'linux-icon' > "$linux_icon_source"
 
     CODEX_INSTALLER_SOURCE_ONLY=1 \
     CODEX_APP_ID="codex-cua-lab" \
     CODEX_APP_DISPLAY_NAME="Codex CUA Lab" \
     CODEX_INSTALL_DIR="$app_dir" \
+    CODEX_LINUX_ICON_SOURCE="$linux_icon_source" \
     bash -c 'source "$1"; validate_app_identity; create_start_script' _ "$REPO_DIR/install.sh"
 
     assert_file_exists "$app_dir/start.sh"
     assert_file_exists "$app_dir/.codex-linux/webview-server.py"
+    assert_file_exists "$app_dir/.codex-linux/codex-cua-lab.png"
+    cmp -s "$linux_icon_source" "$app_dir/.codex-linux/codex-cua-lab.png" \
+        || fail "Expected side-by-side launcher icon to use CODEX_LINUX_ICON_SOURCE"
     assert_contains "$app_dir/start.sh" "CODEX_LINUX_APP_ID=codex-cua-lab"
     assert_contains "$app_dir/start.sh" "CODEX_LINUX_APP_DISPLAY_NAME=Codex\\\\ CUA\\\\ Lab"
     assert_contains "$app_dir/start.sh" 'CODEX_LINUX_WEBVIEW_PORT=${CODEX_WEBVIEW_PORT:-5176}'
@@ -4558,7 +4759,8 @@ JS
     assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxShouldBypassQuitPrompt=()=>codexLinuxExplicitQuitApproved===!0'
     assert_contains "$extracted/.vite/build/main-test.js" '{label:rB(this.appName),click:()=>{typeof codexLinuxPrepareForExplicitQuit===`function`?codexLinuxPrepareForExplicitQuit():typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress(),n.app.quit()}}'
     assert_contains "$extracted/.vite/build/main-test.js" 'if(o.type===`quit-app`){typeof codexLinuxPrepareForExplicitQuit===`function`?codexLinuxPrepareForExplicitQuit():typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress(),n.app.quit();return}'
-    assert_contains "$extracted/.vite/build/main-test.js" 'if((typeof codexLinuxShouldBypassQuitPrompt===`function`&&codexLinuxShouldBypassQuitPrompt())||e||i.canQuitWithoutPrompt()||r||!s&&!c){g=!0,a.markAppQuitting();return}'
+    assert_contains "$extracted/.vite/build/main-test.js" 'if((typeof codexLinuxShouldBypassQuitPrompt===`function`&&codexLinuxShouldBypassQuitPrompt())||e||i.canQuitWithoutPrompt()||r||!s&&!c){process.platform===`linux`&&typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress(),g=!0,a.markAppQuitting();return}'
+    assert_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress(),i.markQuitApproved(),g=!0,a.markAppQuitting()'
     assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxFinalizeQuit=()=>{d(),f.dispose(),n.app.quit()},codexLinuxDrainPromise=Promise.all('
     assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxExplicitQuitDrainTimeoutMs'
     assert_contains "$extracted/.vite/build/main-test.js" 'setTimeout(e,typeof codexLinuxExplicitQuitDrainTimeoutMs'
@@ -4575,7 +4777,7 @@ const source = fs.readFileSync(process.argv[2], "utf8");
 const helperSnippet = source.match(/let codexLinuxQuitInProgress=!1,[^;]*codexLinuxShouldBypassQuitPrompt=\(\)=>codexLinuxExplicitQuitApproved===!0,[^;]*codexLinuxIsQuitInProgress=\(\)=>codexLinuxQuitInProgress===!0;/)?.[0];
 const traySnippet = source.match(/\{label:rB\(this\.appName\),click:\(\)=>\{typeof codexLinuxPrepareForExplicitQuit===`function`\?codexLinuxPrepareForExplicitQuit\(\):typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress\(\),n\.app\.quit\(\)\}\}/)?.[0];
 const quitAppSnippet = source.match(/if\(o\.type===`quit-app`\)\{typeof codexLinuxPrepareForExplicitQuit===`function`\?codexLinuxPrepareForExplicitQuit\(\):typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress\(\),n\.app\.quit\(\);return\}/)?.[0];
-const beforeQuitSnippet = source.match(/if\(\(typeof codexLinuxShouldBypassQuitPrompt===`function`&&codexLinuxShouldBypassQuitPrompt\(\)\)\|\|e\|\|i\.canQuitWithoutPrompt\(\)\|\|r\|\|!s&&!c\)\{g=!0,a\.markAppQuitting\(\);return\}/)?.[0];
+const beforeQuitSnippet = source.match(/if\(\(typeof codexLinuxShouldBypassQuitPrompt===`function`&&codexLinuxShouldBypassQuitPrompt\(\)\)\|\|e\|\|i\.canQuitWithoutPrompt\(\)\|\|r\|\|!s&&!c\)\{process\.platform===`linux`&&typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress\(\),g=!0,a\.markAppQuitting\(\);return\}/)?.[0];
 if (!helperSnippet || !traySnippet || !quitAppSnippet || !beforeQuitSnippet) {
   throw new Error("Could not extract explicit quit snippets");
 }
@@ -4618,7 +4820,7 @@ function runBeforeQuitBypass() {
   const scope = new Function(
     "BI",
     "t",
-    `${helperSnippet}return {runBeforeQuitCheck(e,i,r,a){let s=BI(),c=t.sr().some(e=>e.status===\`ACTIVE\`);${beforeQuitSnippet}return \`prompt\`;},prepare:codexLinuxPrepareForExplicitQuit,bypass:codexLinuxShouldBypassQuitPrompt};`,
+    `${helperSnippet}return {runBeforeQuitCheck(e,i,r,a){let s=BI(),c=t.sr().some(e=>e.status===\`ACTIVE\`);${beforeQuitSnippet}return \`prompt\`;},prepare:codexLinuxPrepareForExplicitQuit,bypass:codexLinuxShouldBypassQuitPrompt,marked:codexLinuxIsQuitInProgress};`,
   )(
     () => true,
     { sr: () => [{ status: "ACTIVE" }] },
@@ -4630,7 +4832,7 @@ function runBeforeQuitBypass() {
   const appQuitting = { markAppQuitting() { state.markCalls += 1; } };
   scope.prepare();
   const bypassed = scope.runBeforeQuitCheck(false, controller, false, appQuitting);
-  return { state, bypassed, shouldBypass: scope.bypass() };
+  return { state, bypassed, shouldBypass: scope.bypass(), marked: scope.marked() };
 }
 
 let state = runTrayQuit();
@@ -4654,7 +4856,7 @@ if (state.prepareCalls !== 0 || state.markCalls !== 1 || state.quitCalls !== 1) 
 }
 
 state = runBeforeQuitBypass();
-if (!state.shouldBypass || state.bypassed !== undefined || state.state.markCalls !== 1) {
+if (!state.shouldBypass || state.bypassed !== undefined || state.state.markCalls !== 1 || !state.marked) {
   throw new Error("before-quit should bypass the Linux quit confirmation after an explicit quit");
 }
 NODE
@@ -4668,7 +4870,7 @@ NODE
 }
 
 test_keybinds_settings_tab_patch_smoke() {
-    info "Checking Keybinds settings tab patch behavior"
+    info "Checking Linux desktop settings tab patch behavior"
     local workspace="$TMP_DIR/keybinds-settings-patch"
     local extracted="$workspace/extracted"
     local output_log="$workspace/output.log"
@@ -4677,135 +4879,45 @@ test_keybinds_settings_tab_patch_smoke() {
     make_fake_extracted_asar "$extracted" 'let D={removeMenu(){},setMenuBarVisibility(){},setIcon(){},once(){}};let t={join(){}};let a={existsSync(){return true},statSync(){return {isFile(){return false}}}};let n={shell:{openPath(){return ""},showItemInFolder(){}}};...process.platform===`win32`?{autoHideMenuBar:!0}:{},process.platform===`win32`&&D.removeMenu(),foo)}),D.once(`ready-to-show`,()=>{var sa=Mi({id:`fileManager`,label:`Finder`,icon:`apps/finder.png`,kind:`fileManager`,darwin:{detect:()=>`open`,args:e=>ai(e)},win32:{label:`File Explorer`,icon:`apps/file-explorer.png`,detect:ca,args:e=>ai(e),open:async({path:e})=>la(e)}});function ca(){let e=1;return e}async function la(e){let t=ua(e);if(t&&(0,a.statSync)(t).isFile()){n.shell.showItemInFolder(t);return}let r=t??e,i=await n.shell.openPath(r);if(i)throw Error(i)}function ua(e){return e}var Ua=Mi({id:`systemDefault`,label:`System Default App`,icon:`apps/file-explorer.png`,kind:`systemDefault`,hidden:!0,darwin:{icon:`apps/finder.png`,detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)},win32:{detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)},linux:{detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)}});async function Wa(e){return e}'
 
     cat > "$extracted/webview/assets/settings-sections-test.js" <<'JS'
-var e=`general-settings`,t=`mcp-settings`,n=[{slug:e},{slug:`appearance`},{slug:`git-settings`},{slug:`connections`},{slug:`local-environments`},{slug:`worktrees`},{slug:`agent`},{slug:`personalization`},{slug:`usage`},{slug:`browser-use`},{slug:`computer-use`},{slug:t},{slug:`plugins-settings`},{slug:`skills-settings`},{slug:`data-controls`}],r=t;export{n,t as r,e as t};
+var e=[`general-settings`,`profile`,`keyboard-shortcuts`,`account`],t=`general-settings`,n=function(){},r=[{slug:`general-settings`},{slug:`profile`},{slug:`appearance`},{slug:`keyboard-shortcuts`}];
 JS
     cat > "$extracted/webview/assets/settings-shared-test.js" <<'JS'
-import{t as d}from"./jsx-runtime-ebkFq_df.js";var c={"general-settings":{id:`settings.nav.general-settings`,defaultMessage:`General`,description:`Title for general settings section`},appearance:{id:`settings.nav.appearance`,defaultMessage:`Appearance`,description:`Title for appearance settings section`}};function m(e){let t=(0,u.c)(17),{slug:r}=e;switch(r){case`appearance`:{let e;return t[1]===Symbol.for(`react.memo_cache_sentinel`)?(e=(0,d.jsx)(n,{id:`settings.section.appearance`,defaultMessage:`Appearance`,description:`Title for appearance settings section`}),t[1]=e):e=t[1],e}case`general-settings`:{let e;return t[2]===Symbol.for(`react.memo_cache_sentinel`)?(e=(0,d.jsx)(n,{id:`settings.section.general-settings`,defaultMessage:`General`,description:`Title for general settings section`}),t[2]=e):e=t[2],e}}}
+import{t as d}from"./jsx-runtime-test.js";var c={"general-settings":{id:`settings.nav.general-settings`,defaultMessage:`General`,description:`Title for general settings section`},"keyboard-shortcuts":{id:`settings.nav.keyboard-shortcuts`,defaultMessage:`Keyboard shortcuts`,description:`Title for keyboard shortcuts settings section`}};function m(e){let t=(0,u.c)(17),{slug:r}=e;switch(r){case`keyboard-shortcuts`:{let e;return t[1]===Symbol.for(`react.memo_cache_sentinel`)?(e=(0,d.jsx)(n,{id:`settings.section.keyboard-shortcuts`,defaultMessage:`Keyboard shortcuts`,description:`Title for keyboard shortcuts settings section`}),t[1]=e):e=t[1],e}case`general-settings`:{let e;return t[2]===Symbol.for(`react.memo_cache_sentinel`)?(e=(0,d.jsx)(n,{id:`settings.section.general-settings`,defaultMessage:`General`,description:`Title for general settings section`}),t[2]=e):e=t[2],e}}}
 JS
     cat > "$extracted/webview/assets/index-test.js" <<'JS'
-var Xge={"general-settings":xh,appearance:Pf,agent:gU},H7={},Zge=[`general-settings`,`appearance`,`agent`,`personalization`,`mcp-settings`,`connections`,`git-settings`,`local-environments`,`worktrees`,`browser-use`,`computer-use`,`data-controls`],Qge=[{key:`app`,heading:H7.appHeading,slugs:[`general-settings`,`appearance`,`connections`,`git-settings`,`usage`]}];function n_e(){let l=`electron`,e=e=>{switch(e.slug){case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:case`data-controls`:case`environments`:return l===`electron`;case`account`:case`general-settings`:case`agent`:case`personalization`:case`mcp-settings`:return!0}};if(O)bb0:switch(D.slug){case`usage`:k=g;break bb0;case`appearance`:case`general-settings`:case`agent`:case`git-settings`:case`account`:case`data-controls`:case`personalization`:k=!1;break bb0;}}function s_e(e){let{slug:n}=e,r=c_e[n];return (0,$.jsx)(r,{})}var c_e={"general-settings":(0,Z.lazy)(()=>s(()=>import(`./general-settings-DZbwMmWz.js`).then(e=>({default:e.GeneralSettings})),__vite__mapDeps([4]),import.meta.url)),appearance:(0,Z.lazy)(()=>s(()=>import(`./appearance-settings-D4xYjo5o.js`).then(e=>({default:e.AppearanceSettings})),__vite__mapDeps([56]),import.meta.url)),agent:(0,Z.lazy)(()=>Promise.resolve({default:l_e}))};
+var Xge={"general-settings":xh,"keyboard-shortcuts":ks,appearance:Pf,agent:gU},H7={},Zge=[`general-settings`,`profile`,`keyboard-shortcuts`,`appearance`,`agent`,`personalization`,`mcp-settings`,`connections`,`git-settings`,`local-environments`,`worktrees`,`browser-use`,`computer-use`,`data-controls`],Qge=[{key:`app`,heading:H7.appHeading,slugs:[`general-settings`,`profile`,`keyboard-shortcuts`,`appearance`,`connections`,`git-settings`,`usage`]}];function n_e(){let l=`electron`,e=e=>{switch(e.slug){case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:case`data-controls`:case`environments`:return l===`electron`;case`account`:case`general-settings`:case`agent`:case`personalization`:case`keyboard-shortcuts`:case`mcp-settings`:return!0}};if(O)bb0:switch(D.slug){case`usage`:k=g;break bb0;case`appearance`:case`general-settings`:case`agent`:case`git-settings`:case`account`:case`data-controls`:case`personalization`:case`keyboard-shortcuts`:k=!1;break bb0;}}function s_e(e){let{slug:n}=e,r=c_e[n];return (0,$.jsx)(r,{})}var c_e={"general-settings":(0,Z.lazy)(()=>s(()=>import(`./general-settings-DZbwMmWz.js`).then(e=>({default:e.GeneralSettings})),__vite__mapDeps([4]),import.meta.url)),"keyboard-shortcuts":(0,Z.lazy)(()=>s(()=>import(`./keyboard-shortcuts-settings-test.js`),[],import.meta.url)),appearance:(0,Z.lazy)(()=>s(()=>import(`./appearance-settings-D4xYjo5o.js`).then(e=>({default:e.AppearanceSettings})),__vite__mapDeps([56]),import.meta.url)),agent:(0,Z.lazy)(()=>Promise.resolve({default:l_e}))};
+JS
+    cat > "$extracted/webview/assets/keyboard-shortcuts-settings-test.js" <<'JS'
+slug:`keyboard-shortcuts`;export default function KeyboardShortcutsSettings(){}
 JS
 
     node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
-    assert_file_exists "$extracted/webview/assets/keybinds-settings-linux.js"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "function KeybindsSettings"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "HotkeyWindowHotkeyRow"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "DEFAULT_SHORTCUTS"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "codex-linux-keybind-overrides"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "function ShortcutInput"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "data-codex-keybind-input"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "newThread"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "openFolder"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "toggleTerminal"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "toggleDiffPanel"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "thread9"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "CmdOrCtrl+Alt+N"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "CmdOrCtrl+Shift+O"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "CmdOrCtrl+G"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "CmdOrCtrl+J"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "CmdOrCtrl+Alt+Shift+C"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "navigateBack"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "navigateForward"
-    assert_not_contains "$extracted/webview/assets/keybinds-settings-linux.js" "CmdOrCtrl+Shift+K"
-    assert_not_contains "$extracted/webview/assets/keybinds-settings-linux.js" "Ctrl+\`"
-    assert_not_contains "$extracted/webview/assets/keybinds-settings-linux.js" "newWindow"
-    assert_not_contains "$extracted/webview/assets/keybinds-settings-linux.js" "openThreadOverlay"
-    assert_not_contains "$extracted/webview/assets/keybinds-settings-linux.js" "openAvatarOverlay"
-    assert_not_contains "$extracted/webview/assets/keybinds-settings-linux.js" "toggleTraceRecording"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "codex-linux-system-tray-enabled"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "codex-linux-warm-start-enabled"
-    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "codex-linux-prompt-window-enabled"
-    assert_contains "$extracted/webview/assets/settings-sections-test.js" 'slug:`keybinds`'
-    assert_contains "$extracted/webview/assets/settings-shared-test.js" "settings.nav.keybinds"
-    assert_contains "$extracted/webview/assets/settings-shared-test.js" "settings.section.keybinds"
-    assert_contains "$extracted/webview/assets/index-test.js" "keybinds-settings-linux.js"
-    assert_contains "$extracted/webview/assets/index-test.js" "keybinds:xh"
-    assert_contains "$extracted/webview/assets/index-test.js" 'Zge=\[`general-settings`,`keybinds`'
-    assert_contains "$extracted/webview/assets/index-test.js" 'slugs:\[`general-settings`,`keybinds`'
-    assert_contains "$extracted/webview/assets/index-test.js" 'case`keybinds`:return l===`electron`'
-    assert_contains "$extracted/webview/assets/index-test.js" "codexLinuxKeybindOverridesRuntime"
-    assert_contains "$extracted/webview/assets/index-test.js" "codex-linux-keybind-overrides"
-    assert_contains "$extracted/webview/assets/index-test.js" "go-to-thread-index"
-    assert_contains "$extracted/webview/assets/index-test.js" "newThreadAlt"
-    assert_contains "$extracted/webview/assets/index-test.js" "new-chat"
-    assert_contains "$extracted/webview/assets/index-test.js" "toggle-terminal"
-    assert_contains "$extracted/webview/assets/index-test.js" "toggle-diff-panel"
-    assert_contains "$extracted/webview/assets/index-test.js" "isShortcutCaptureTarget"
-    assert_contains "$extracted/webview/assets/index-test.js" "data-codex-keybind-input"
-    assert_not_contains "$extracted/webview/assets/index-test.js" "isEditableTarget(event))return"
-    assert_not_contains "$extracted/webview/assets/index-test.js" "ac(id)"
-
-    node - "$extracted/webview/assets/index-test.js" <<'NODE'
-const fs = require("fs");
-const vm = require("vm");
-const file = process.argv[2];
-const source = fs.readFileSync(file, "utf8");
-const marker = ";function codexLinuxKeybindOverridesRuntime()";
-const start = source.indexOf(marker);
-if (start === -1) throw new Error("missing runtime patch");
-const runtime = source
-  .slice(start)
-  .replace("codexLinuxKeybindOverridesRuntime();", "globalThis.codexLinuxKeybindOverridesRuntime=codexLinuxKeybindOverridesRuntime;");
-const listeners = {};
-const calls = [];
-class FakeElement {
-  constructor(isKeybindInput = false) {
-    this.isKeybindInput = isKeybindInput;
-  }
-  closest(selector) {
-    return selector === "[data-codex-keybind-input]" && this.isKeybindInput ? this : null;
-  }
-}
-const context = {
-  window: { addEventListener: (event, fn) => (listeners[event] ??= []).push(fn) },
-  Element: FakeElement,
-  navigator: { platform: "Linux x86_64" },
-  localStorage: { getItem: () => JSON.stringify({ toggleFileTreePanel: "Ctrl+E" }) },
-  Ct: { toggleFileTreePanel: "Command+Shift+E" },
-  E: {
-    dispatchHostMessage: (message) => calls.push(message),
-    dispatchMessage: () => {},
-  },
-  globalThis: null,
-};
-context.globalThis = context;
-vm.runInNewContext(runtime, context);
-context.codexLinuxKeybindOverridesRuntime();
-const makeEvent = (target) => ({
-  defaultPrevented: false,
-  repeat: false,
-  target,
-  ctrlKey: true,
-  altKey: false,
-  shiftKey: false,
-  metaKey: false,
-  key: "e",
-  preventDefault() {
-    this.defaultPrevented = true;
-  },
-  stopPropagation() {
-    this.stopped = true;
-  },
-});
-const composerEvent = makeEvent(new FakeElement(false));
-listeners.keydown[0](composerEvent);
-if (calls.length !== 1 || calls[0].type !== "toggle-file-tree-panel" || !composerEvent.defaultPrevented) {
-  throw new Error("Ctrl+E override did not dispatch from composer-like target");
-}
-const keybindInputEvent = makeEvent(new FakeElement(true));
-listeners.keydown[0](keybindInputEvent);
-if (calls.length !== 1 || keybindInputEvent.defaultPrevented) {
-  throw new Error("keybind capture input should not dispatch runtime override");
-}
-NODE
+    assert_file_exists "$extracted/webview/assets/linux-desktop-settings-linux.js"
+    [ ! -f "$extracted/webview/assets/keybinds-settings-linux.js" ] || fail "Old Keybinds settings asset should not be written for current native Keyboard Shortcuts"
+    assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "function LinuxDesktopSettings"
+    assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "Linux desktop"
+    assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "System tray"
+    assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "Warm start"
+    assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "Build information"
+    assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "codex-linux-system-tray-enabled"
+    assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "codex-linux-warm-start-enabled"
+    assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "codex-linux-prompt-window-enabled"
+    assert_contains "$extracted/webview/assets/settings-sections-test.js" 'slug:`linux-desktop`'
+    assert_contains "$extracted/webview/assets/settings-shared-test.js" "settings.nav.linux-desktop"
+    assert_contains "$extracted/webview/assets/settings-shared-test.js" "settings.section.linux-desktop"
+    assert_contains "$extracted/webview/assets/index-test.js" "linux-desktop-settings-linux.js"
+    assert_contains "$extracted/webview/assets/index-test.js" '"linux-desktop":'
+    assert_contains "$extracted/webview/assets/index-test.js" 'Zge=\[`general-settings`,`linux-desktop`'
+    assert_contains "$extracted/webview/assets/index-test.js" 'slugs:\[`general-settings`,`linux-desktop`'
+    assert_contains "$extracted/webview/assets/index-test.js" 'case`linux-desktop`:return l===`electron`'
+    assert_not_contains "$extracted/webview/assets/index-test.js" "keybinds-settings-linux.js"
+    assert_not_contains "$extracted/webview/assets/index-test.js" "codexLinuxKeybindOverridesRuntime"
 
     node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
-    assert_occurrence_count "$extracted/webview/assets/settings-sections-test.js" 'slug:`keybinds`' '1'
-    assert_occurrence_count "$extracted/webview/assets/settings-shared-test.js" "settings.nav.keybinds" '1'
-    assert_occurrence_count "$extracted/webview/assets/settings-shared-test.js" "settings.section.keybinds" '1'
-    assert_occurrence_count "$extracted/webview/assets/index-test.js" "keybinds-settings-linux.js" '1'
-    assert_occurrence_count "$extracted/webview/assets/index-test.js" "keybinds:xh" '1'
-    assert_occurrence_count "$extracted/webview/assets/index-test.js" "function codexLinuxKeybindOverridesRuntime" '1'
+    assert_occurrence_count "$extracted/webview/assets/settings-sections-test.js" 'slug:`linux-desktop`' '1'
+    assert_occurrence_count "$extracted/webview/assets/settings-shared-test.js" "settings.nav.linux-desktop" '1'
+    assert_occurrence_count "$extracted/webview/assets/settings-shared-test.js" "settings.section.linux-desktop" '1'
+    assert_occurrence_count "$extracted/webview/assets/index-test.js" "linux-desktop-settings-linux.js" '1'
 }
 
 test_keybinds_settings_patch_warns_on_bundle_shape_miss() {
@@ -4817,22 +4929,28 @@ test_keybinds_settings_patch_warns_on_bundle_shape_miss() {
     mkdir -p "$workspace"
     make_fake_extracted_asar "$extracted" 'let D={removeMenu(){},setMenuBarVisibility(){},setIcon(){},once(){}};let t={join(){}};let a={existsSync(){return true},statSync(){return {isFile(){return false}}}};let n={shell:{openPath(){return ""},showItemInFolder(){}}};...process.platform===`win32`?{autoHideMenuBar:!0}:{},process.platform===`win32`&&D.removeMenu(),foo)}),D.once(`ready-to-show`,()=>{var sa=Mi({id:`fileManager`,label:`Finder`,icon:`apps/finder.png`,kind:`fileManager`,darwin:{detect:()=>`open`,args:e=>ai(e)},win32:{label:`File Explorer`,icon:`apps/file-explorer.png`,detect:ca,args:e=>ai(e),open:async({path:e})=>la(e)}});function ca(){let e=1;return e}async function la(e){let t=ua(e);if(t&&(0,a.statSync)(t).isFile()){n.shell.showItemInFolder(t);return}let r=t??e,i=await n.shell.openPath(r);if(i)throw Error(i)}function ua(e){return e}var Ua=Mi({id:`systemDefault`,label:`System Default App`,icon:`apps/file-explorer.png`,kind:`systemDefault`,hidden:!0,darwin:{icon:`apps/finder.png`,detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)},win32:{detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)},linux:{detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)}});async function Wa(e){return e}'
     rm "$extracted/webview/assets/settings-row-test.js"
+    cat > "$extracted/webview/assets/keyboard-shortcuts-settings-test.js" <<'JS'
+slug:`keyboard-shortcuts`;export default function KeyboardShortcutsSettings(){}
+JS
     cat > "$extracted/webview/assets/settings-sections-test.js" <<'JS'
-var e=`general-settings`,t=`mcp-settings`,n=[{slug:e},{slug:`appearance`}],r=t;export{n,t as r,e as t};
+var e=[`general-settings`,`profile`,`keyboard-shortcuts`],t=`general-settings`,n=[{slug:`general-settings`},{slug:`keyboard-shortcuts`}];
 JS
     cat > "$extracted/webview/assets/settings-shared-test.js" <<'JS'
-var c={"general-settings":{id:`settings.nav.general-settings`,defaultMessage:`General`,description:`Title for general settings section`}};function m(e){let t=(0,u.c)(17),{slug:r}=e;switch(r){case`general-settings`:{let e;return t[2]===Symbol.for(`react.memo_cache_sentinel`)?(e=(0,d.jsx)(n,{id:`settings.section.general-settings`,defaultMessage:`General`,description:`Title for general settings section`}),t[2]=e):e=t[2],e}}}
+var c={"general-settings":{id:`settings.nav.general-settings`,defaultMessage:`General`,description:`Title for general settings section`},"keyboard-shortcuts":{id:`settings.nav.keyboard-shortcuts`,defaultMessage:`Keyboard shortcuts`,description:`Title for keyboard shortcuts settings section`}};function m(e){let t=(0,u.c)(17),{slug:r}=e;switch(r){case`general-settings`:{let e;return t[2]===Symbol.for(`react.memo_cache_sentinel`)?(e=(0,d.jsx)(n,{id:`settings.section.general-settings`,defaultMessage:`General`,description:`Title for general settings section`}),t[2]=e):e=t[2],e}}}
 JS
     cat > "$extracted/webview/assets/index-test.js" <<'JS'
-var Xge={"general-settings":xh,appearance:Pf},H7={},Zge=[`general-settings`,`appearance`],Qge=[{key:`app`,heading:H7.appHeading,slugs:[`general-settings`,`appearance`,`connections`,`git-settings`,`usage`]}];function n_e(){let l=`electron`,e=e=>{switch(e.slug){case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:case`data-controls`:case`environments`:return l===`electron`;case`account`:case`general-settings`:return!0}};if(O)bb0:switch(D.slug){case`appearance`:case`general-settings`:k=!1;break bb0;}}var c_e={"general-settings":(0,Z.lazy)(()=>s(()=>import(`./general-settings-DZbwMmWz.js`).then(e=>({default:e.GeneralSettings})),__vite__mapDeps([4]),import.meta.url))};
+var Xge={"general-settings":xh,appearance:Pf},H7={},Zge=[`general-settings`,`appearance`],Qge=[{key:`app`,heading:H7.appHeading,slugs:[`general-settings`,`appearance`,`connections`,`git-settings`,`usage`]}];
 JS
 
     node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
     assert_contains "$output_log" "WARN: Keybinds settings patch skipped"
-    assert_contains "$output_log" "could not find settings row asset"
-    [ ! -f "$extracted/webview/assets/keybinds-settings-linux.js" ] || fail "Keybinds asset should not be written when bundle shape is missing"
-    assert_not_contains "$extracted/webview/assets/settings-sections-test.js" 'slug:`keybinds`'
-    assert_not_contains "$extracted/webview/assets/index-test.js" "keybinds-settings-linux.js"
+    assert_contains "$output_log" "could not add Linux desktop visibility"
+    [ ! -f "$extracted/webview/assets/linux-desktop-settings-linux.js" ] || fail "Linux desktop settings asset should not be written when route bundle is missing"
+    [ ! -f "$extracted/webview/assets/linux-settings-row-linux.js" ] || fail "Fallback row asset should not be written when route bundle is missing"
+    [ ! -f "$extracted/webview/assets/linux-settings-section-linux.js" ] || fail "Fallback section asset should not be written when route bundle is missing"
+    [ ! -f "$extracted/webview/assets/linux-settings-group-linux.js" ] || fail "Fallback group asset should not be written when route bundle is missing"
+    assert_not_contains "$extracted/webview/assets/settings-sections-test.js" 'slug:`linux-desktop`'
+    assert_not_contains "$extracted/webview/assets/index-test.js" "linux-desktop-settings-linux.js"
 }
 
 test_browser_annotation_screenshot_patch_smoke() {
@@ -5390,7 +5508,7 @@ test_linux_computer_use_ui_opt_in_smoke() {
     local main_bundle="$extracted/.vite/build/main-test.js"
     local renderer_asset="$extracted/webview/assets/use-model-settings-test.js"
     local current_renderer_asset="$extracted/webview/assets/use-is-plugins-enabled-current-test.js"
-    local install_flow_asset="$extracted/webview/assets/use-plugin-install-flow-test.js"
+    local install_flow_asset="$extracted/webview/assets/app-initial~app-main~worktree-init-v2-page~remote-conversation-page~pull-requests-page~plug~test.js"
     local native_apps_asset="$extracted/webview/assets/use-native-apps.electron-test.js"
     local bundle_body
     local renderer_body
@@ -5419,7 +5537,11 @@ function b(e){return e===`macOS`||e===`windows`}
 function x(e){let t=(0,_.c)(16),{enabled:n,hostId:r}=e,i=n===void 0?!0:n,{isLoading:a,platform:o}=m(),s=u(`1506311413`),c;t[0]===r?c=t[1]:(c={featureName:`computer_use`,hostId:r},t[0]=r,t[1]=c);let l=v(c),d=o===`windows`&&!a,f=i&&d,p;t[2]===f?p=t[3]:(p={enabled:f},t[2]=f,t[3]=p);let h=S(p),g=l.isLoading||d&&h.isLoading,y=l.enabled&&(!d||h.enabled),x;t[4]!==y||t[5]!==i||t[6]!==g||t[7]!==s||t[8]!==a||t[9]!==o?(x=w({areRequiredFeaturesEnabled:y,enabled:i,isAnyFeatureLoading:g,isComputerUseGateEnabled:s,isHostCompatiblePlatform:b(o),isPlatformLoading:a,windowType:`electron`}),t[4]=y,t[5]=i,t[6]=g,t[7]=s,t[8]=a,t[9]=o,t[10]=x):x=t[10];return x}
 JS
 )"
-    install_flow_body='function Qe({forceReloadPlugins:e,hostId:t}){let ne=f({featureName:`computer_use`,hostId:t}),re=!ne.isLoading&&ne.enabled,[L,R]=(0,Z.useState)({});return re}'
+    install_flow_body="$(cat <<'JS'
+function Rj(e){return e===`macOS`||e===`windows`}
+function zj(e){let t=(0,Uj.c)(16),{enabled:n,hostId:r}=e,i=n===void 0?!0:n,{isLoading:a,platform:o}=Xt(),s=cn(`1506311413`),c;t[0]===r?c=t[1]:(c={featureName:`computer_use`,hostId:r},t[0]=r,t[1]=c);let l=Fj(c),u=o===`windows`&&!a,d=i&&u,f;t[2]===d?f=t[3]:(f={enabled:d},t[2]=d,t[3]=f);let p=Bj(f),m=l.isLoading||u&&p.isLoading,h=l.enabled&&(!u||p.enabled),g;t[4]!==h||t[5]!==i||t[6]!==m||t[7]!==s||t[8]!==a||t[9]!==o?(g=Hj({areRequiredFeaturesEnabled:h,enabled:i,isAnyFeatureLoading:m,isComputerUseGateEnabled:s,isHostCompatiblePlatform:Rj(o),isPlatformLoading:a,windowType:`electron`}),t[4]=h,t[5]=i,t[6]=m,t[7]=s,t[8]=a,t[9]=o,t[10]=g):g=t[10];return g}
+JS
+)"
     native_apps_body="$(cat <<'JS'
 function d(e){return e.find(e=>e.plugin.name===`computer-use`)??null}
 function C(e){let t=(0,S.c)(9),{enabled:n}=e,{platform:a,isLoading:o}=c(),s=n&&(a===`macOS`||a===`windows`),l;t[0]===Symbol.for(`react.memo_cache_sentinel`)?(l={order:`usage`},t[0]=l):l=t[0];let u;t[1]===s?u=t[2]:(u={params:l,queryConfig:{enabled:s,staleTime:i.FIVE_MINUTES,refetchOnWindowFocus:!1}},t[1]=s,t[2]=u);let d=r(`native-desktop-apps`,u);return d}
@@ -5443,7 +5565,7 @@ JS
     assert_not_contains "$renderer_asset" 'function hae(e){return e===`macOS`||e===`windows`||e===`linux`}'
     assert_not_contains "$current_renderer_asset" 'areRequiredFeaturesEnabled:o===`linux`||y'
     assert_not_contains "$native_apps_asset" 'a===`macOS`||a===`windows`||a===`linux`'
-    assert_not_contains "$install_flow_asset" 'navigator.userAgent.includes(`Linux`)'
+    assert_not_contains "$install_flow_asset" 'areRequiredFeaturesEnabled:o===`linux`||h'
 
     # Branch 2: env var opts in — all Computer Use UI patches apply.
     rm "$main_bundle" "$renderer_asset" "$current_renderer_asset" "$install_flow_asset" "$native_apps_asset"
@@ -5464,7 +5586,8 @@ JS
     assert_contains "$current_renderer_asset" 'areRequiredFeaturesEnabled:o===`linux`||y'
     assert_contains "$current_renderer_asset" 'isAnyFeatureLoading:o===`linux`?!1:g'
     assert_contains "$native_apps_asset" 'a===`macOS`||a===`windows`||a===`linux`'
-    assert_contains "$install_flow_asset" 'navigator.userAgent.includes(`Linux`)'
+    assert_contains "$install_flow_asset" 'areRequiredFeaturesEnabled:o===`linux`||h'
+    assert_contains "$install_flow_asset" 'isAnyFeatureLoading:o===`linux`?!1:m'
 
     # Branch 3: settings.json flag opts in even without env var.
     rm "$main_bundle" "$renderer_asset" "$current_renderer_asset" "$install_flow_asset" "$native_apps_asset"
@@ -5483,7 +5606,7 @@ JS
     assert_contains "$renderer_asset" 'function hae(e){return e===`macOS`||e===`windows`||e===`linux`}'
     assert_contains "$current_renderer_asset" 'areRequiredFeaturesEnabled:o===`linux`||y'
     assert_contains "$native_apps_asset" 'a===`macOS`||a===`windows`||a===`linux`'
-    assert_contains "$install_flow_asset" 'navigator.userAgent.includes(`Linux`)'
+    assert_contains "$install_flow_asset" 'areRequiredFeaturesEnabled:o===`linux`||h'
 }
 
 test_linux_file_manager_patch_fails_soft() {
@@ -6313,6 +6436,7 @@ EOF
 
 main() {
     test_common_helper_sourcing
+    test_extract_webview_replaces_linux_icon_assets
     test_package_payload_permission_normalization
     test_deb_builder_smoke
     test_deb_builder_rebuilds_deleted_updater_source
@@ -6328,11 +6452,13 @@ main() {
     test_appimage_builder_smoke
     test_missing_input_failure
     test_make_install_reports_missing_native_packages
+    test_make_run_app_reports_missing_launcher
     test_make_build_app_uses_installer_download_flow_by_default
     test_make_build_app_fresh_uses_installer_fresh_flow
     test_installer_refreshes_stale_cached_dmg_metadata
     test_extract_dmg_repairs_safe_7z_link_warnings
     test_fresh_install_removes_cached_dmg_metadata
+    test_fresh_reuse_dmg_uses_cache_when_metadata_matches
     test_rebuild_candidate_uses_validated_default_dmg
     test_native_shortcut_targets_compose_existing_flows
     test_fedora_dependency_bootstrap_installs_rpmbuild
