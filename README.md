@@ -1,3 +1,5 @@
+Before opening a pull request, read [CONTRIBUTING.md](https://github.com/ilysenko/codex-desktop-linux/blob/main/CONTRIBUTING.md).
+
 # Codex Desktop for Linux
 
 Unofficial Linux build wrapper for [OpenAI Codex Desktop](https://openai.com/codex/).
@@ -9,8 +11,7 @@ The project builds native `.deb`, `.rpm`, and `.pkg.tar.zst` packages, supports
 local AppImage self-builds and Nix, and can install a local update manager that
 rebuilds future Linux packages from newer upstream DMGs.
 
-Before opening a pull request, read [CONTRIBUTING.md](CONTRIBUTING.md). For
-implementation details, see [AGENTS.md](AGENTS.md).
+For implementation details, see [AGENTS.md](AGENTS.md).
 
 ## Install By Platform
 
