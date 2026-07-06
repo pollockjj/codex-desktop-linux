@@ -2899,18 +2899,61 @@ apply_feature_launcher_hook_env() {
     export "$name"
 }
 
+# Remove entries from ELECTRON_ARGS whose switch name (the part before '=')
+# matches one of the given switches, logging each drop against the new arg
+# that supersedes it.
+remove_superseded_electron_args() {
+    local new_arg="$1"
+    shift
+    local -a kept=()
+    local arg name switch dropped
+
+    for arg in "${ELECTRON_ARGS[@]}"; do
+        name="${arg%%=*}"
+        dropped=0
+        for switch in "$@"; do
+            if [ "$name" = "$switch" ]; then
+                echo "Dropping earlier Electron arg '$arg'; a launcher hook supplied '$new_arg'"
+                dropped=1
+                break
+            fi
+        done
+        [ "$dropped" -eq 1 ] || kept+=("$arg")
+    done
+
+    ELECTRON_ARGS=("${kept[@]}")
+}
+
 apply_feature_launcher_hook_electron_arg() {
     local arg="$1"
+    local switch
 
     case "$arg" in
         --enable-features=*)
             add_electron_enable_features "${arg#--enable-features=}"
-            ;;
-        *)
-            ELECTRON_ARGS+=("$arg")
-            scan_electron_rendering_arg "$arg"
+            return 0
             ;;
     esac
+
+    # Launcher hooks run last, after feature electron-args, the persistent
+    # flags file, and pass-through CLI args have all been collected into
+    # ELECTRON_ARGS. Chromium already resolves repeated switches last-wins, so
+    # replace any earlier occurrence of the same switch instead of appending a
+    # conflicting duplicate to the final argv. --ozone-platform and
+    # --ozone-platform-hint are one family: an explicit platform supersedes an
+    # earlier hint and vice versa.
+    switch="${arg%%=*}"
+    case "$switch" in
+        --ozone-platform|--ozone-platform-hint)
+            remove_superseded_electron_args "$arg" --ozone-platform --ozone-platform-hint
+            ;;
+        *)
+            remove_superseded_electron_args "$arg" "$switch"
+            ;;
+    esac
+
+    ELECTRON_ARGS+=("$arg")
+    scan_electron_rendering_arg "$arg"
 }
 
 run_feature_launcher_hooks() {

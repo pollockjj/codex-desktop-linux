@@ -4135,6 +4135,36 @@ EOF
     [[ "$output" == *"electron=<--force-device-scale-factor=2>"* ]] || fail "launcher hook --force-device-scale-factor must reach Electron over CODEX_FORCE_DEVICE_SCALE_FACTOR: $output"
     [[ "$output" != *"<--force-device-scale-factor=1>"* ]] || fail "env-derived --force-device-scale-factor must be dropped when a launcher hook overrides it: $output"
 
+    # A hook-emitted arg must also replace a conflicting arg already collected in
+    # ELECTRON_ARGS (pass-through CLI, persistent flags file, or feature
+    # electron-args) instead of appending a duplicate switch to the final argv.
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default FEATURE_LAUNCHER_HOOK_DIR="$hook_force_wayland_dir" "$launcher_probe" probe -- --ozone-platform=x11)"
+    [[ "$output" == *"electron=<--ozone-platform=wayland>"* ]] || fail "launcher hook --ozone-platform must replace a pass-through ozone arg: $output"
+    [[ "$output" != *"<--ozone-platform=x11>"* ]] || fail "pass-through --ozone-platform must be dropped when a launcher hook supersedes it: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default FEATURE_LAUNCHER_HOOK_DIR="$hook_force_wayland_dir" "$launcher_probe" probe -- --ozone-platform-hint=auto)"
+    [[ "$output" == *"electron=<--ozone-platform=wayland>"* ]] || fail "launcher hook --ozone-platform must replace a pass-through ozone hint: $output"
+    [[ "$output" != *"<--ozone-platform-hint=auto>"* ]] || fail "pass-through --ozone-platform-hint must be dropped when a hook supplies an explicit platform: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default FEATURE_LAUNCHER_HOOK_DIR="$hook_scale_dir" "$launcher_probe" probe -- --force-device-scale-factor=1)"
+    [[ "$output" == *"electron=<--force-device-scale-factor=2>"* ]] || fail "launcher hook scale arg must replace a pass-through scale arg: $output"
+    [[ "$output" != *"<--force-device-scale-factor=1>"* ]] || fail "pass-through --force-device-scale-factor must be dropped when a launcher hook supersedes it: $output"
+
+    local hook_scale_flags_dir="$TMP_DIR/hook-scale-user-flags"
+    local hook_scale_flags_file="$hook_scale_flags_dir/electron-flags.conf"
+    mkdir -p "$hook_scale_flags_dir"
+    printf '%s\n' '--force-device-scale-factor=1' > "$hook_scale_flags_file"
+    output="$(env -i PATH="$PATH" HOME="$HOME" APP_CONFIG_DIR="$hook_scale_flags_dir" USER_ELECTRON_FLAGS_FILE="$hook_scale_flags_file" CODEX_LINUX_RENDERING_MODE=default FEATURE_LAUNCHER_HOOK_DIR="$hook_scale_dir" "$launcher_probe" probe)"
+    [[ "$output" == *"electron=<--force-device-scale-factor=2>"* ]] || fail "launcher hook scale arg must replace a persistent-flags scale arg: $output"
+    [[ "$output" != *"<--force-device-scale-factor=1>"* ]] || fail "persistent-flags --force-device-scale-factor must be dropped when a launcher hook supersedes it: $output"
+
+    local hook_scale_feature_args_dir="$TMP_DIR/hook-scale-feature-args"
+    mkdir -p "$hook_scale_feature_args_dir"
+    printf '%s\n' '--force-device-scale-factor=1' > "$hook_scale_feature_args_dir/feature"
+    output="$(env -i PATH="$PATH" HOME="$HOME" FEATURE_ELECTRON_ARGS_DIR="$hook_scale_feature_args_dir" CODEX_LINUX_RENDERING_MODE=default FEATURE_LAUNCHER_HOOK_DIR="$hook_scale_dir" "$launcher_probe" probe)"
+    [[ "$output" == *"electron=<--force-device-scale-factor=2>"* ]] || fail "launcher hook scale arg must replace a feature electron-args scale arg: $output"
+    [[ "$output" != *"<--force-device-scale-factor=1>"* ]] || fail "feature electron-args --force-device-scale-factor must be dropped when a launcher hook supersedes it: $output"
+
     assert_contains "$REPO_DIR/launcher/start.sh.template" "warm_start_ipc_sent"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "launcher_phase"
     assert_contains "$REPO_DIR/launcher/start.sh.template" 'date +%s%N'
